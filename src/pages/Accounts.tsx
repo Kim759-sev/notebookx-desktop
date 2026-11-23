@@ -1,9 +1,15 @@
-import { useState } from 'react';
+import { DialogPanel, DialogFooter } from '../components/ui/dialog';
+import { Button } from '../components/ui/button';
+import { Input } from '../components/ui/input';
+import { Table } from '../components/ui/table';
+import { Select } from '../components/ui/select';
+import { useEffect, useRef, useState } from 'react';
 import {
   Activity,
   Cable,
   Clock3,
   ExternalLink,
+  Copy,
   LogIn,
   Plus,
   RefreshCw,
@@ -29,56 +35,74 @@ import {
 } from '../components/workspace';
 
 function Login({ close }: { close: () => void }) {
-  const { t, run, data } = useWork();
-  const [url, setUrl] = useState(''),
-    [code, setCode] = useState('');
+  const { t, run, data, busy, notify } = useWork();
+  const [url, setUrl] = useState('');
+  const [code, setCode] = useState('');
+  const codeInput = useRef<HTMLInputElement>(null);
+  const needsFocus = useRef(false);
+  const mock = data.settings.backendMode === 'mock';
+  const begin = () => void run(() => api('start_account_login'), (next) => {
+    needsFocus.current = true;
+    setCode('');
+    setUrl(next);
+  });
+  useEffect(() => {
+    if (url && !busy && needsFocus.current) {
+      codeInput.current?.focus();
+      needsFocus.current = false;
+    }
+  }, [url, busy]);
+  async function copyLink() {
+    try {
+      await navigator.clipboard.writeText(url);
+      notify(t('Authorization link copied'));
+    } catch {
+      notify(t('Could not copy the authorization link'), true);
+    }
+  }
   return (
-    <Modal title="Add Google account" close={close}>
-      <div className="modal-body stack">
-        {!url ? (
-          <div className="actions">
-            <button
-              className="primary"
-              onClick={() => void run(() => api('start_account_login'), setUrl)}
-            >
-              <LogIn />
-              {t('Authorization')}
-            </button>
-            <button onClick={() => void run(() => api('adopt_cli_account'), close)}>
-              {t('Adopt CLI account')}
-            </button>
+    <Modal title="Add Google account" description="Link an account to sync its credit balance." close={close}>
+      {!url ? (
+        <DialogPanel className="space-y-4">
+          <Button variant="default" onClick={begin}>
+            <LogIn />{t(mock ? 'Start sandbox authorization' : 'Open Google authorization in browser')}
+          </Button>
+          <div className="space-y-2 border-t border-border pt-4">
+            <p className="text-sm">{t('Already signed in with colab in your terminal? Import that account instead.')}</p>
+            <Button variant="outline" onClick={() => void run(() => api('adopt_cli_account'), close)}>{t('Import local CLI account directly')}</Button>
           </div>
-        ) : (
-          <form
-            className="stack"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void run(() => api('complete_account_login', { authCode: code.trim() }), close);
-            }}
-          >
-            {data.settings.backendMode === 'mock' ? (
-              <p className="notice">{t('Sandbox authorization: enter a demo code.')}</p>
-            ) : (
-              <External url={url}>
-                {t('Open authorization page')}
-                <ExternalLink size={14} />
-              </External>
+        </DialogPanel>
+      ) : (
+        <form onSubmit={(event) => {
+          event.preventDefault();
+          if (code.trim() && !busy) void run(() => api('complete_account_login', { authCode: code.trim() }), close);
+        }}>
+          <DialogPanel className="space-y-4">
+            {mock ? <p className="notice">{t('Sandbox authorization: enter a demo code.')}</p> : (
+              <>
+                <ol className="list-decimal space-y-2 ps-5 text-sm text-foreground marker:font-semibold">
+                  <li>{t('Google authorization opened in your default browser. If it did not open, reopen the page or copy the link.')}</li>
+                  <li>{t('Choose your Google account (for example, your 20x Pro+ account) and click Allow.')}</li>
+                  <li>{t('Paste the final Authorization Code below and finish linking to sync your credit balance.')}</li>
+                </ol>
+                <div className="actions">
+                  <External url={url}><ExternalLink />{t('Reopen page')}</External>
+                  <Button variant="outline" onClick={() => void copyLink()}><Copy />{t('Copy authorization link')}</Button>
+                </div>
+              </>
             )}
             <Field label="Authorization code">
-              <input
-                autoFocus
-                required
-                value={code}
-                onChange={(e) => setCode(e.target.value)}
-                autoComplete="off"
-              />
+              <Input ref={codeInput} autoFocus required autoComplete="off" spellCheck={false} value={code}
+                placeholder={t(mock ? 'Authorization code' : 'Paste the Google authorization code starting with 4/0A...')}
+                onChange={(event) => setCode(event.target.value)} />
             </Field>
-            <div>
-              <button className="primary">{t('Complete sign-in')}</button>
-            </div>
-          </form>
-        )}
-      </div>
+          </DialogPanel>
+          <DialogFooter>
+            <Button variant="outline" onClick={begin}><RefreshCw />{t('Get a new link')}</Button>
+            <Button variant="default" type="submit" disabled={!code.trim() || busy}>{t('Finish linking and sync credits')}</Button>
+          </DialogFooter>
+        </form>
+      )}
     </Modal>
   );
 }
@@ -95,10 +119,10 @@ function Guards({ initial, save }: { initial: CostGuardPolicy; save: (v: CostGua
     >
       <GuardFields value={guard} change={setGuard} />
       <div>
-        <button>
+        <Button variant="outline" type="submit">
           <ShieldCheck />
           {t('Save')}
-        </button>
+        </Button>
       </div>
     </form>
   );
@@ -128,23 +152,22 @@ export default function Accounts() {
         icon={Users}
         actions={
           <div className="actions">
-            <button
-              className="icon-btn"
+            <Button variant="outline" size="icon"
               aria-label={t('Refresh')}
               onClick={() => void run(() => api('refresh_accounts_usage'))}
             >
               <RefreshCw />
-            </button>
-            <button className="primary" onClick={() => setLogin(true)}>
+            </Button>
+            <Button variant="default" onClick={() => setLogin(true)}>
               <Plus />
               {t('Add Google account')}
-            </button>
+            </Button>
           </div>
         }
       >
         <p>{t('Future launches use the selected account. Existing instances retain their owner.')}</p>
         <div className="table-wrap">
-          <table>
+          <Table>
             <thead>
               <tr>
                 {['Google accounts', 'Balance', 'Burn', 'Remaining', ''].map((l, i) => (
@@ -174,14 +197,13 @@ export default function Accounts() {
                       {a.isActive ? (
                         <Badge dot label="Active" tone="green" />
                       ) : (
-                        <button
+                        <Button variant="outline"
                           onClick={() => void run(() => api('switch_account', { accountId: a.id }))}
                         >
                           {t('Switch account')}
-                        </button>
+                        </Button>
                       )}
-                      <button
-                        className="icon-btn"
+                      <Button variant="outline" size="icon"
                         aria-label={t('Delete') + ' ' + a.email}
                         onClick={() => {
                           if (window.confirm(t('Remove this item?') + ' ' + a.email))
@@ -189,13 +211,13 @@ export default function Accounts() {
                         }}
                       >
                         <Trash2 />
-                      </button>
+                      </Button>
                     </div>
                   </td>
                 </tr>
               ))}
             </tbody>
-          </table>
+          </Table>
         </div>
         {!data.accounts.length && <Empty label="No account" />}
       </Panel>
@@ -229,7 +251,7 @@ export default function Accounts() {
                   {s.autoStopAt && (
                     <code>{new Date(s.autoStopAt).toLocaleString(data.settings.locale)}</code>
                   )}
-                  <button
+                  <Button variant="outline"
                     disabled={s.state === 'stopping'}
                     onClick={() =>
                       void run(() =>
@@ -239,9 +261,8 @@ export default function Accounts() {
                   >
                     <Clock3 />
                     {t('Extend by 2 hours')}
-                  </button>
-                  <button
-                    className="danger"
+                  </Button>
+                  <Button variant="destructive-outline"
                     disabled={s.state === 'stopping'}
                     onClick={() =>
                       void run(() => api('stop_session', { sessionName: s.name, force: false }))
@@ -249,7 +270,7 @@ export default function Accounts() {
                   >
                     <Square />
                     {t('Back up and stop billing')}
-                  </button>
+                  </Button>
                 </div>
               )}
               {s.lastError && <p className="notice bad">{s.lastError}</p>}
@@ -262,7 +283,7 @@ export default function Accounts() {
         title="Cost guards"
         icon={ShieldCheck}
         actions={
-          <select
+          <Select
             aria-label={t('Cost guards')}
             value={guardScope}
             onChange={(e) => setGuardScope(e.target.value)}
@@ -273,7 +294,7 @@ export default function Accounts() {
                 {t(p.name)}
               </option>
             ))}
-          </select>
+          </Select>
         }
       >
         <p className="notice">
@@ -300,17 +321,17 @@ export default function Accounts() {
         title="Port forwarding"
         icon={Cable}
         actions={
-          <button disabled={!active.length} onClick={() => setAdd(true)}>
+          <Button variant="outline" disabled={!active.length} onClick={() => setAdd(true)}>
             <Plus />
             {t('New tunnel')}
-          </button>
+          </Button>
         }
       >
         {!data.tunnels.length ? (
           <Empty label="No tunnels yet" />
         ) : (
           <div className="table-wrap">
-            <table>
+            <Table>
               <thead>
                 <tr>
                   {['Connection', 'Local port', 'Remote port', 'Session', 'Status', ''].map((l, i) => (
@@ -340,17 +361,17 @@ export default function Accounts() {
                       </small>
                     </td>
                     <td>
-                      <button
+                      <Button variant="outline"
                         disabled={x.status === 'stopped'}
                         onClick={() => void run(() => api('stop_port_tunnel', { tunnelId: x.id }))}
                       >
                         {t('Stop')}
-                      </button>
+                      </Button>
                     </td>
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </Table>
           </div>
         )}
       </Panel>
@@ -375,19 +396,19 @@ export default function Accounts() {
                 );
             }}
           >
-            <div className="modal-body form-grid">
+            <DialogPanel className="form-grid">
               <Field label="Name">
-                <input required value={label} onChange={(e) => setLabel(e.target.value)} />
+                <Input required value={label} onChange={(e) => setLabel(e.target.value)} />
               </Field>
               <Field label="Session">
-                <select required value={target?.name ?? ''} onChange={(e) => setChoice(e.target.value)}>
+                <Select required value={target?.name ?? ''} onChange={(e) => setChoice(e.target.value)}>
                   {active.map((s) => (
                     <option key={s.id}>{s.name}</option>
                   ))}
-                </select>
+                </Select>
               </Field>
               <Field label="Local port">
-                <input
+                <Input
                   required
                   type="number"
                   min={1}
@@ -397,7 +418,7 @@ export default function Accounts() {
                 />
               </Field>
               <Field label="Remote port">
-                <input
+                <Input
                   required
                   type="number"
                   min={1}
@@ -407,17 +428,17 @@ export default function Accounts() {
                 />
               </Field>
               <Field label="Health path">
-                <input value={health} onChange={(e) => setHealth(e.target.value)} />
+                <Input value={health} onChange={(e) => setHealth(e.target.value)} />
               </Field>
-            </div>
-            <div className="modal-foot">
-              <button type="button" onClick={() => setAdd(false)}>
+            </DialogPanel>
+            <DialogFooter>
+              <Button variant="outline" type="button" onClick={() => setAdd(false)}>
                 {t('Cancel')}
-              </button>
-              <button className="primary" disabled={!target}>
+              </Button>
+              <Button variant="default" type="submit" disabled={!target}>
                 {t('New tunnel')}
-              </button>
-            </div>
+              </Button>
+            </DialogFooter>
           </form>
         </Modal>
       )}

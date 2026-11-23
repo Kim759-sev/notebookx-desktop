@@ -456,6 +456,21 @@ impl AppCore {
             crate::colab::accounts::complete_oauth_login(&self.data_dir, &new_id, auth_code)
                 .await?;
         acc.isActive = true;
+        // Activate newly signed-in account and immediately fetch its live CO PRO+ CCU balance!
+        let _ = crate::colab::accounts::use_saved_account(&self.data_dir, &new_id).await;
+        if let Ok(usage) = crate::colab::accounts::fetch_account_usage(&self.data_dir, &new_id).await {
+            acc.balanceCcu = Some(usage.balance_ccu);
+            acc.burnRateHourly = Some(usage.burn_rate_hourly);
+            acc.hoursRemaining = if usage.burn_rate_hourly > 0.01 {
+                Some(usage.balance_ccu / usage.burn_rate_hourly)
+            } else {
+                None
+            };
+            acc.activeAssignmentsCount = usage.assignments_count;
+            acc.planTier = usage.plan_tier;
+            acc.lastUpdatedAt = Some(Utc::now().to_rfc3339());
+            acc.usageStale = false;
+        }
         {
             let mut st = self.store.write().await;
             for a in st.accounts.iter_mut() {
@@ -476,6 +491,19 @@ impl AppCore {
         let new_id = format!("acc-{}", &Uuid::new_v4().to_string()[..8]);
         let mut acc = crate::colab::accounts::adopt_active_cli_account(&self.data_dir, &new_id).await?;
         acc.isActive = true;
+        if let Ok(usage) = crate::colab::accounts::fetch_account_usage(&self.data_dir, &new_id).await {
+            acc.balanceCcu = Some(usage.balance_ccu);
+            acc.burnRateHourly = Some(usage.burn_rate_hourly);
+            acc.hoursRemaining = if usage.burn_rate_hourly > 0.01 {
+                Some(usage.balance_ccu / usage.burn_rate_hourly)
+            } else {
+                None
+            };
+            acc.activeAssignmentsCount = usage.assignments_count;
+            acc.planTier = usage.plan_tier;
+            acc.lastUpdatedAt = Some(Utc::now().to_rfc3339());
+            acc.usageStale = false;
+        }
         {
             let mut st = self.store.write().await;
             for a in st.accounts.iter_mut() {

@@ -1,3 +1,8 @@
+import { Textarea } from '../components/ui/textarea';
+import { Button } from '../components/ui/button';
+import { Input } from '../components/ui/input';
+import { Select } from '../components/ui/select';
+import { Table } from '../components/ui/table';
 import { useState } from 'react';
 import { Bot, Boxes, Cpu, Package, Play, ScanSearch, Send } from 'lucide-react';
 import { api, type Message } from '../lib/api';
@@ -61,17 +66,22 @@ function Chat({ deployment: d }: { deployment: LlamaDeployment }) {
           );
         }}
       >
-        <input
+        <Textarea rows={1} size="sm" onKeyDown={(event) => {
+            if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              event.currentTarget.form?.requestSubmit();
+            }
+          }}
           className="grow"
           aria-label={t('Message')}
           placeholder={t('Message')}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
         />
-        <button className="primary" disabled={!draft.trim()}>
+        <Button variant="default" type="submit" disabled={!draft.trim()}>
           <Send />
           {t('Send')}
-        </button>
+        </Button>
       </form>
     </div>
   );
@@ -107,7 +117,7 @@ export default function Plugins() {
           }}
         >
           <Field label="Hugging Face GGUF">
-            <input
+            <Input
               required
               pattern="[^ /]+/[^ /]+"
               value={repo}
@@ -119,9 +129,8 @@ export default function Plugins() {
           </Field>
           <div className="actions">
             {repos.map((r) => (
-              <button
+              <Button variant="ghost"
                 type="button"
-                className="text-btn"
                 key={r}
                 onClick={() => {
                   setRepo(r);
@@ -129,12 +138,12 @@ export default function Plugins() {
                 }}
               >
                 {r.split('/')[1]}
-              </button>
+              </Button>
             ))}
           </div>
           <div className="form-grid">
             <Field label="Target GPU">
-              <select
+              <Select
                 value={target}
                 onChange={(e) => {
                   const i = Number(e.target.value);
@@ -148,10 +157,10 @@ export default function Plugins() {
                     {gpu} · {gb} GB
                   </option>
                 ))}
-              </select>
+              </Select>
             </Field>
             <Field label="Minimum VRAM (GB)">
-              <input
+              <Input
                 required
                 type="number"
                 min="1"
@@ -165,10 +174,10 @@ export default function Plugins() {
             </Field>
           </div>
           <div>
-            <button className="primary">
+            <Button variant="default" type="submit">
               <ScanSearch />
               {t('Inspect and select quantization')}
-            </button>
+            </Button>
           </div>
         </form>
       </Panel>
@@ -192,7 +201,7 @@ export default function Plugins() {
             }}
           >
             <div className="table-wrap">
-              <table>
+              <Table>
                 <thead>
                   <tr>
                     {['Quantization', 'Size', 'Estimated VRAM', 'Status'].map((l) => (
@@ -232,11 +241,11 @@ export default function Plugins() {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </Table>
             </div>
             <div className="actions">
               <Field label="Local port">
-                <input
+                <Input
                   type="number"
                   min={1}
                   max={65535}
@@ -245,10 +254,10 @@ export default function Plugins() {
                   onChange={(e) => setPort(+e.target.value)}
                 />
               </Field>
-              <button className="primary" disabled={!quant}>
+              <Button variant="default" type="submit" disabled={!quant}>
                 <Play />
                 {t('Deploy llama.cpp')}
-              </button>
+              </Button>
             </div>
           </form>
         </Panel>
@@ -258,7 +267,7 @@ export default function Plugins() {
           title="Deployments"
           icon={Bot}
           actions={
-            <select
+            <Select
               aria-label={t('Deployments')}
               value={d.id}
               onChange={(e) => setActive(e.target.value)}
@@ -268,7 +277,7 @@ export default function Plugins() {
                   {d.repoId} · {d.localPort}
                 </option>
               ))}
-            </select>
+            </Select>
           }
         >
           <Chat key={d.id} deployment={d} />

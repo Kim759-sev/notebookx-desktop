@@ -1,3 +1,9 @@
+import { DialogPanel, DialogFooter } from '../components/ui/dialog';
+import { Input } from '../components/ui/input';
+import { Select } from '../components/ui/select';
+import { Textarea } from '../components/ui/textarea';
+import { Button } from '../components/ui/button';
+import { Table } from '../components/ui/table';
 import { useState } from 'react';
 import {
   Activity,
@@ -80,26 +86,26 @@ function ProfileEditor({
           );
         }}
       >
-        <div className="modal-body stack">
+        <DialogPanel className="stack">
           <div className="form-grid">
             <Field label="Profile name">
-              <input autoFocus required value={p.name} onChange={(e) => patch('name', e.target.value)} />
+              <Input autoFocus required value={p.name} onChange={(e) => patch('name', e.target.value)} />
             </Field>
             <Field label="Description">
-              <input value={p.description} onChange={(e) => patch('description', e.target.value)} />
+              <Input value={p.description} onChange={(e) => patch('description', e.target.value)} />
             </Field>
             <Field label="Accelerator">
-              <select
+              <Select
                 value={p.accelerator}
                 onChange={(e) => patch('accelerator', e.target.value as WorkflowProfile['accelerator'])}
               >
                 {accelerators.map((x) => (
                   <option key={x}>{x}</option>
                 ))}
-              </select>
+              </Select>
             </Field>
             <Field label="Minimum VRAM (GB)">
-              <input
+              <Input
                 type="number"
                 min="0"
                 required
@@ -108,7 +114,7 @@ function ProfileEditor({
               />
             </Field>
             <Field label="VRAM retries">
-              <input
+              <Input
                 type="number"
                 min="0"
                 required
@@ -118,14 +124,14 @@ function ProfileEditor({
             </Field>
             <Toggle label="High-RAM" checked={p.highMem} onChange={(v) => patch('highMem', v)} />
             <Field label="Drive root" wide>
-              <input
+              <Input
                 required
                 value={p.driveRootPath}
                 onChange={(e) => patch('driveRootPath', e.target.value)}
               />
             </Field>
             <Field label="Drive mount">
-              <select
+              <Select
                 value={p.driveMountMode}
                 onChange={(e) =>
                   patch('driveMountMode', e.target.value as WorkflowProfile['driveMountMode'])
@@ -140,10 +146,10 @@ function ProfileEditor({
                     {t(l)}
                   </option>
                 ))}
-              </select>
+              </Select>
             </Field>
             <Field label="Startup mode">
-              <select
+              <Select
                 value={p.startupMode}
                 onChange={(e) => patch('startupMode', e.target.value as WorkflowProfile['startupMode'])}
               >
@@ -156,18 +162,18 @@ function ProfileEditor({
                     {t(l)}
                   </option>
                 ))}
-              </select>
+              </Select>
             </Field>
             {p.startupMode === 'managedScript' && (
               <Field label="Script path" wide>
-                <input
+                <Input
                   value={p.managedScriptRelPath ?? ''}
                   onChange={(e) => patch('managedScriptRelPath', e.target.value || null)}
                 />
               </Field>
             )}
             <Field label="Required nodes" wide>
-              <textarea
+              <Textarea
                 rows={2}
                 defaultValue={p.requiredNodes.join('\n')}
                 onChange={(e) =>
@@ -184,10 +190,10 @@ function ProfileEditor({
           </div>
           <h3>{t('Cost guards')}</h3>
           <GuardFields value={p.costGuard} change={(v) => patch('costGuard', v)} />
-        </div>
-        <div className="modal-foot">
+        </DialogPanel>
+        <DialogFooter>
           {existing && (
-            <button
+            <Button variant="destructive-outline"
               type="button"
               className="danger push-left"
               disabled={busy}
@@ -197,15 +203,15 @@ function ProfileEditor({
               }}
             >
               {t('Delete')}
-            </button>
+            </Button>
           )}
-          <button type="button" onClick={close}>
+          <Button variant="outline" type="button" onClick={close}>
             {t('Cancel')}
-          </button>
-          <button disabled={busy} className="primary">
+          </Button>
+          <Button variant="default" type="submit" disabled={busy}>
             {t('Save')}
-          </button>
-        </div>
+          </Button>
+        </DialogFooter>
       </form>
     </Modal>
   );
@@ -248,7 +254,7 @@ function SessionTools({ s }: { s: ColabSession }) {
         {s.lastError && <p className="notice bad">{s.lastError}</p>}
         {live && (
           <div className="actions line-top">
-            <button
+            <Button variant="outline"
               onClick={() =>
                 void run(
                   () => api('extend_session_deadline', { sessionName: s.name, addMinutes: 120 }),
@@ -259,14 +265,13 @@ function SessionTools({ s }: { s: ColabSession }) {
             >
               <Clock3 />
               {t('Extend by 2 hours')}
-            </button>
-            <button
-              className="danger"
+            </Button>
+            <Button variant="destructive-outline"
               onClick={() => void run(() => api('stop_session', { sessionName: s.name, force: false }))}
             >
               <Square />
               {t('Back up and stop billing')}
-            </button>
+            </Button>
             {s.autoStopAt && (
               <small>{new Date(s.autoStopAt).toLocaleTimeString(data.settings.locale)}</small>
             )}
@@ -277,7 +282,7 @@ function SessionTools({ s }: { s: ColabSession }) {
         <div className="two-col">
           <Panel title="ComfyUI snapshot" icon={Save}>
             <p>{t('Snapshots preserve custom nodes and settings in Google Drive.')}</p>
-            <button
+            <Button variant="outline"
               onClick={() =>
                 void run(
                   () => api('save_comfy_environment_snapshot', { sessionName: s.name }),
@@ -287,7 +292,7 @@ function SessionTools({ s }: { s: ColabSession }) {
             >
               <HardDrive />
               {t('Save environment snapshot')}
-            </button>
+            </Button>
           </Panel>
           <Panel
             title="DramaSmith"
@@ -305,7 +310,7 @@ function SessionTools({ s }: { s: ColabSession }) {
               <code>{s.managementLocalUrl ?? '—'}</code>
               {s.cloudflareUrl && <External url={s.cloudflareUrl}>{s.cloudflareUrl}</External>}
             </div>
-            <button
+            <Button variant="outline"
               onClick={() =>
                 void run(
                   () =>
@@ -321,7 +326,7 @@ function SessionTools({ s }: { s: ColabSession }) {
             >
               {t('Sync endpoint to DramaSmith')}
               <ArrowUpRight />
-            </button>
+            </Button>
           </Panel>
         </div>
       )}
@@ -363,10 +368,10 @@ export default function Studio() {
         title="Cloud ComfyUI Studio"
         subtitle="Launch a workflow, connect to ComfyUI, and manage your cloud runtime."
         actions={
-          <button onClick={() => void run(() => api('refresh_accounts_usage'))}>
+          <Button variant="outline" onClick={() => void run(() => api('refresh_accounts_usage'))}>
             <RefreshCw />
             {t('Refresh')}
-          </button>
+          </Button>
         }
       />
       <section className="hero">
@@ -393,7 +398,7 @@ export default function Studio() {
           </p>
           <div className="actions">
             {!live ? (
-              <button
+              <Button variant="default"
                 className="primary launch"
                 onClick={() =>
                   p ? void run(() => api('launch_profile_session', { profileId: p.id })) : add()
@@ -407,11 +412,10 @@ export default function Studio() {
                       ? 'Launch CPU runtime'
                       : 'Launch cloud ComfyUI',
                 )}
-              </button>
+              </Button>
             ) : s.comfyReady ? (
               <>
-                <button
-                  className="primary"
+                <Button variant="default"
                   onClick={() =>
                     void run(() =>
                       api('open_comfy_desktop_window', { url: comfy, title: 'ComfyUI · ' + s.name }),
@@ -420,7 +424,7 @@ export default function Studio() {
                 >
                   <Monitor />
                   {t('Open desktop ComfyUI')}
-                </button>
+                </Button>
                 <External url={isDesktop() ? comfy : runtimePreviewUrl(s.name)}>
                   {t('Open in browser')}
                   <ArrowUpRight size={14} />
@@ -446,10 +450,10 @@ export default function Studio() {
             <Layers3 size={19} />
             {t('Workflow profiles')} <span className="count">{data.profiles.length}</span>
           </h2>
-          <button onClick={add}>
+          <Button variant="outline" onClick={add}>
             <Plus />
             {t('New profile')}
-          </button>
+          </Button>
         </div>
         <div className="profiles">
           {data.profiles.map((item, i) => {
@@ -460,12 +464,12 @@ export default function Studio() {
                 key={item.id}
                 className={'profile ' + (selected ? 'selected ' : '') + 'color-' + (i % 4)}
               >
-                <button
+                <Button variant="ghost"
                   className="pick"
                   aria-pressed={selected}
                   aria-label={t('Select') + ' ' + t(item.name)}
                   onClick={() => select(item.id)}
-                ></button>
+                ></Button>
                 <div className="profile-top">
                   <span className="profile-icon">
                     <Icon size={20} />
@@ -495,14 +499,14 @@ export default function Studio() {
                     {item.maxRetries} {t('retries')}
                   </span>
                 </div>
-                <button
+                <Button variant="ghost" size="icon"
                   className="edit-icon"
                   title={t('Edit profile')}
                   aria-label={t('Edit profile') + ' ' + item.name}
                   onClick={() => setEditor({ p: structuredClone(item), existing: true })}
                 >
                   <Pencil size={13} />
-                </button>
+                </Button>
               </article>
             );
           })}
@@ -513,14 +517,14 @@ export default function Studio() {
         icon={Cable}
         className="connections"
         actions={
-          <button className="text-btn" onClick={() => navigate('accounts')}>
+          <Button variant="ghost" onClick={() => navigate('accounts')}>
             {t('View sessions')}
             <ArrowRight />
-          </button>
+          </Button>
         }
       >
         <div className="table-wrap">
-          <table>
+          <Table>
             <thead>
               <tr>
                 <th>{t('Connection')}</th>
@@ -568,7 +572,7 @@ export default function Studio() {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </Table>
         </div>
       </Panel>
       {s?.state === 'stopped' && (

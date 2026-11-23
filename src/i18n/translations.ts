@@ -292,6 +292,22 @@ Sandbox instance released.|已释放沙盒实例。|已釋放沙盒執行個體�
 Sandbox snapshot saved.|已保存沙盒快照。|已儲存沙盒快照。
 Disabled by idle guard|闲置保护已停止实例|閒置防護已停止執行個體
 CLI usage update failed|无法刷新 CLI 用量|無法更新 CLI 用量
+Link an account to sync its credit balance.|关联账号后即可同步积分余额。|關聯帳號後即可同步點數餘額。
+Start sandbox authorization|开始沙盒授权|開始沙盒授權
+Open Google authorization in browser|在浏览器打开 Google 授权页|在瀏覽器開啟 Google 授權頁
+Already signed in with colab in your terminal? Import that account instead.|仅在你之前已在终端运行 colab 并登录时使用此选项。|僅在你先前已在終端機執行 colab 並登入時使用此選項。
+Import local CLI account directly|直接导入本机 CLI 已登录账号|直接匯入本機 CLI 已登入帳號
+Google authorization opened in your default browser. If it did not open, reopen the page or copy the link.|已在默认浏览器打开 Google 授权页面。若未弹出，可点击「重新打开网页」或「复制授权链接」。|已在預設瀏覽器開啟 Google 授權頁面。若未開啟，可點選「重新開啟網頁」或「複製授權連結」。
+Choose your Google account (for example, your 20x Pro+ account) and click Allow.|选择你的 Google 账号（如 20x Pro+ 账号），然后点击「允许」。|選擇你的 Google 帳號（如 20x Pro+ 帳號），然後點選「允許」。
+Paste the final Authorization Code below and finish linking to sync your credit balance.|将网页最终显示的授权码 (Authorization Code) 粘贴到下方，点击「完成关联并同步积分」即可实时同步积分余额。|將網頁最後顯示的授權碼 (Authorization Code) 貼到下方，點選「完成關聯並同步點數」即可即時同步點數餘額。
+Reopen page|重新打开网页|重新開啟網頁
+Copy authorization link|复制授权链接|複製授權連結
+Authorization link copied|已复制授权链接|已複製授權連結
+Could not copy the authorization link|未能复制授权链接，请重新打开网页。|無法複製授權連結，請重新開啟網頁。
+Paste the Google authorization code starting with 4/0A...|粘贴 4/0A... 开头的 Google 授权码|貼上以 4/0A... 開頭的 Google 授權碼
+Get a new link|重新获取链接|重新取得連結
+Finish linking and sync credits|完成关联并同步积分|完成關聯並同步點數
+characters|个字符|個字元
 `;
 const entries = new Map<string, string[]>();
 for (const row of catalog.trim().split('\n')) {

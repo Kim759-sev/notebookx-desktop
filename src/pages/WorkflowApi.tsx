@@ -1,3 +1,8 @@
+import { DialogPanel, DialogFooter } from '../components/ui/dialog';
+import { Textarea } from '../components/ui/textarea';
+import { Input } from '../components/ui/input';
+import { Select } from '../components/ui/select';
+import { Button } from '../components/ui/button';
 import { useState } from 'react';
 import { ChevronDown, Code2, Copy, FileJson, Network, Pencil, Play, Plus, Trash2 } from 'lucide-react';
 import { api } from '../lib/api';
@@ -106,13 +111,13 @@ function TemplateEditor({
           );
         }}
       >
-        <div className="modal-body stack">
+        <DialogPanel className="stack">
           <div className="actions">
             <FileImport label="Import JSON" load={load} />
             <code>workflow_api.json</code>
           </div>
           <Field label="Paste workflow JSON">
-            <textarea
+            <Textarea spellCheck={false} footer={<>{raw.length} {t('characters')}</>}
               className="code-input"
               required
               rows={5}
@@ -130,10 +135,10 @@ function TemplateEditor({
           </Field>
           <div className="form-grid">
             <Field label="Name">
-              <input required value={w.name} onChange={(e) => set({ ...w, name: e.target.value })} />
+              <Input required value={w.name} onChange={(e) => set({ ...w, name: e.target.value })} />
             </Field>
             <Field label="Bound profile">
-              <select
+              <Select
                 required
                 value={w.profileId}
                 onChange={(e) => set({ ...w, profileId: e.target.value })}
@@ -143,14 +148,14 @@ function TemplateEditor({
                     {t(p.name)}
                   </option>
                 ))}
-              </select>
+              </Select>
             </Field>
             <Field label="Output type">
-              <select value={w.outputKind} onChange={(e) => set({ ...w, outputKind: e.target.value })}>
+              <Select value={w.outputKind} onChange={(e) => set({ ...w, outputKind: e.target.value })}>
                 {['video', 'image', 'audio', 'json'].map((x) => (
                   <option key={x}>{x}</option>
                 ))}
-              </select>
+              </Select>
             </Field>
             <Toggle
               label="Allow continuous shots"
@@ -160,9 +165,8 @@ function TemplateEditor({
           </div>
           <div className="section-head">
             <h3>{t('Parameter bindings')}</h3>
-            <button
+            <Button variant="outline" size="icon"
               type="button"
-              className="icon-btn"
               aria-label={t('Parameter bindings')}
               onClick={() =>
                 set({
@@ -182,13 +186,13 @@ function TemplateEditor({
               }
             >
               <Plus />
-            </button>
+            </Button>
           </div>
           {w.bindings.map((b, i) => (
             <div className="binding" key={i}>
               {(['key', 'nodeId', 'inputField'] as const).map((k, j) => (
                 <Field key={k} label={['Parameter', 'Node', 'Input'][j]}>
-                  <input
+                  <Input
                     required
                     value={b[k]}
                     onChange={(e) =>
@@ -208,23 +212,22 @@ function TemplateEditor({
                   />
                 </Field>
               ))}
-              <button
+              <Button variant="outline" size="icon"
                 type="button"
-                className="icon-btn"
                 aria-label={t('Delete')}
                 onClick={() => set({ ...w, bindings: w.bindings.filter((_, n) => n !== i) })}
               >
                 <Trash2 />
-              </button>
+              </Button>
             </div>
           ))}
-        </div>
-        <div className="modal-foot">
-          <button type="button" onClick={close}>
+        </DialogPanel>
+        <DialogFooter>
+          <Button variant="outline" type="button" onClick={close}>
             {t('Cancel')}
-          </button>
-          <button className="primary">{t('Save')}</button>
-        </div>
+          </Button>
+          <Button variant="default" type="submit">{t('Save')}</Button>
+        </DialogFooter>
       </form>
     </Modal>
   );
@@ -291,13 +294,13 @@ export function Runner({ w }: { w: SavedApiWorkflow }) {
               return (
                 <Field key={k} wide={k === 'prompt'} label={label}>
                   {k === 'prompt' ? (
-                    <textarea
+                    <Textarea
                       rows={3}
                       value={String(params[k] ?? '')}
                       onChange={(e) => setParams({ ...params, [k]: e.target.value })}
                     />
                   ) : (
-                    <input
+                    <Input
                       type={number ? 'number' : 'text'}
                       min={k === 'frames' ? 1 : undefined}
                       value={String(params[k] ?? '')}
@@ -312,13 +315,13 @@ export function Runner({ w }: { w: SavedApiWorkflow }) {
             {w.supportsContinuity && (
               <>
                 <Field label="Continuity">
-                  <select value={mode} onChange={(e) => setMode(e.target.value)}>
+                  <Select value={mode} onChange={(e) => setMode(e.target.value)}>
                     <option value="start">start · {t('First shot')}</option>
                     <option value="continue">continue · {t('Continue sequence')}</option>
-                  </select>
+                  </Select>
                 </Field>
                 <Field label="Sequence name">
-                  <input
+                  <Input
                     required={mode === 'continue'}
                     value={sequence}
                     onChange={(e) => setSequence(e.target.value)}
@@ -326,17 +329,17 @@ export function Runner({ w }: { w: SavedApiWorkflow }) {
                 </Field>
                 {mode === 'continue' && (
                   <Field label="Parent task ID" wide>
-                    <input required value={parent} onChange={(e) => setParent(e.target.value)} />
+                    <Input required value={parent} onChange={(e) => setParent(e.target.value)} />
                   </Field>
                 )}
               </>
             )}
           </div>
           <div>
-            <button className="primary">
+            <Button variant="default" type="submit">
               <Play />
               {t(data.settings.autoWakeOnApiCall ? 'Run test with auto-wake' : 'Run test')}
-            </button>
+            </Button>
           </div>
         </form>
         {result && (
@@ -353,15 +356,15 @@ export function Runner({ w }: { w: SavedApiWorkflow }) {
         icon={Code2}
         actions={
           <div className="actions">
-            <select
+            <Select
               aria-label={t('Request examples')}
               value={lang}
               onChange={(e) => setLang(e.target.value)}
             >
               <option>curl</option>
               <option>Python</option>
-            </select>
-            <button
+            </Select>
+            <Button variant="outline"
               onClick={() =>
                 void run(
                   () => navigator.clipboard.writeText(snippet),
@@ -371,7 +374,7 @@ export function Runner({ w }: { w: SavedApiWorkflow }) {
             >
               <Copy />
               {t('Copy')}
-            </button>
+            </Button>
           </div>
         }
       >
@@ -415,7 +418,7 @@ export default function WorkflowApi() {
         title="Workflow templates"
         icon={FileJson}
         actions={
-          <button
+          <Button variant="outline"
             disabled={!data.profiles.length}
             onClick={() =>
               setEditing({
@@ -433,13 +436,13 @@ export default function WorkflowApi() {
           >
             <Plus />
             {t('Import API workflow')}
-          </button>
+          </Button>
         }
       >
         {w ? (
           <>
             <div className="actions">
-              <select
+              <Select
                 aria-label={t('Workflow templates')}
                 value={w.id}
                 onChange={(e) => setSelected(e.target.value)}
@@ -449,13 +452,12 @@ export default function WorkflowApi() {
                     {t(x.name)}
                   </option>
                 ))}
-              </select>
-              <button onClick={() => setEditing(structuredClone(w))}>
+              </Select>
+              <Button variant="outline" onClick={() => setEditing(structuredClone(w))}>
                 <Pencil />
                 {t('Edit')}
-              </button>
-              <button
-                className="icon-btn"
+              </Button>
+              <Button variant="outline" size="icon"
                 aria-label={t('Delete')}
                 onClick={() => {
                   if (window.confirm(t('Remove this item?')))
@@ -463,7 +465,7 @@ export default function WorkflowApi() {
                 }}
               >
                 <Trash2 />
-              </button>
+              </Button>
             </div>
             <div className="chips line-top">
               <span>

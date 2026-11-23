@@ -1,15 +1,18 @@
 """NotebookX credential bridge. Only the marker line is part of its protocol."""
 import base64
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import logging
 import math
 import os
 from pathlib import Path
+import secrets
 import sys
 import tempfile
 from urllib.error import HTTPError
-from urllib.parse import quote, urlencode
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 ROOT = Path.home() / ".notebookx-desktop"
@@ -18,6 +21,19 @@ LEGACY = Path.home() / ".config/colab-cli/token.json"
 SERVICE = "notebookx-desktop"
 CLI_SLOT = ("google-colab-cli", "oauth_token")
 TUN = "https://colab.research.google.com/tun/m/"
+DEFAULT_CLIENT_ID = "764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleusercontent.com"
+DEFAULT_CLIENT_SECRET = "d-FL95Q19q7MQmFpd7hHD0Ty"
+OAUTH_AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
+OAUTH_TOKEN_URI = "https://oauth2.googleapis.com/token"
+REMOTE_REDIRECT_URI = "https://sdk.cloud.google.com/applicationdefaultauthcode.html"
+PUBLIC_SCOPES = [
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/cloud-platform",
+    "https://www.googleapis.com/auth/colaboratory",
+    "https://www.googleapis.com/auth/drive.file",
+]
 
 
 class Failure(Exception):
@@ -170,28 +186,59 @@ def active():
 def credential(account):
     raw = active() if account == "active" else get("account:" + account)
     if not raw:
+        if account == "active":
+            raise Failure("未检测到命令行已登录的 Colab 凭证，请点击「账号授权」在浏览器登录 Google 账号。")
         raise Failure("No credential is available for this account.")
     return json.loads(raw)
 
 
+def _stdlib_refresh(info):
+    body = urlencode({
+        "client_id": info.get("client_id") or DEFAULT_CLIENT_ID,
+        "client_secret": info.get("client_secret") or DEFAULT_CLIENT_SECRET,
+        "refresh_token": info["refresh_token"],
+        "grant_type": "refresh_token",
+    }).encode("utf-8")
+    req = Request(
+        info.get("token_uri") or OAUTH_TOKEN_URI,
+        data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    with urlopen(req, timeout=20) as resp:
+        tok = json.load(resp)
+    info = dict(info)
+    info["token"] = tok["access_token"]
+    if tok.get("id_token"):
+        info["id_token"] = tok["id_token"]
+    if tok.get("expires_in"):
+        exp = datetime.now(timezone.utc) + timedelta(seconds=int(tok["expires_in"]))
+        info["expiry"] = exp.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return info
+
+
+def _is_expired(info):
+    exp_raw = info.get("expiry")
+    if not exp_raw or not isinstance(exp_raw, str):
+        return False
+    try:
+        cleaned = exp_raw.replace("Z", "+00:00")
+        exp = datetime.fromisoformat(cleaned)
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) + timedelta(seconds=60) >= exp
+    except ValueError:
+        return False
+
+
 def access(account, force=False):
     info = credential(account)
-    if info.get("refresh_token"):
-        try:
-            from google.oauth2.credentials import Credentials
-            from google.auth.transport.requests import Request as RefreshRequest
-        except ImportError:
-            pass
+    if info.get("refresh_token") and (force or not info.get("token") or _is_expired(info)):
+        info = _stdlib_refresh(info)
+        raw = json.dumps(info)
+        if account == "active":
+            set_slots(raw, None)
         else:
-            creds = Credentials.from_authorized_user_info(info)
-            if force or not creds.valid:
-                creds.refresh(RefreshRequest())
-                raw = creds.to_json()
-                if account == "active":
-                    set_slots(raw, None)
-                else:
-                    put("account:" + account, raw)
-                info = json.loads(raw)
+            put("account:" + account, raw)
     if not info.get("token"):
         raise Failure("The credential needs a new sign-in.")
     return info
@@ -258,17 +305,84 @@ def rollback():
         put("add-backup", None)
 
 
-def login_flow(verifier=None):
-    from importlib.resources import files
-    from colab_cli.auth import PUBLIC_SCOPES, REMOTE_REDIRECT_URI
-    from google_auth_oauthlib.flow import InstalledAppFlow
+def oauth_client_credentials():
     custom = Path.home() / ".colab-cli-oauth-config.json"
-    config = custom if custom.exists() else files("colab_cli").joinpath("oauth_config.json")
-    flow = InstalledAppFlow.from_client_config(json.loads(config.read_text()), PUBLIC_SCOPES,
-                                              code_verifier=verifier,
-                                              autogenerate_code_verifier=verifier is None)
-    flow.redirect_uri = REMOTE_REDIRECT_URI
-    return flow
+    if custom.exists():
+        try:
+            cfg = json.loads(custom.read_text(encoding="utf-8"))
+            installed = cfg.get("installed") or cfg.get("web") or {}
+            if installed.get("client_id") and installed.get("client_secret"):
+                return installed["client_id"], installed["client_secret"]
+        except Exception:
+            pass
+    return DEFAULT_CLIENT_ID, DEFAULT_CLIENT_SECRET
+
+
+def build_pkce_login_url():
+    client_id, _ = oauth_client_credentials()
+    verifier = secrets.token_urlsafe(64)
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    params = {
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": REMOTE_REDIRECT_URI,
+        "scope": " ".join(PUBLIC_SCOPES),
+        "access_type": "offline",
+        "prompt": "consent",
+        "token_usage": "remote",
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+    }
+    return verifier, OAUTH_AUTH_URI + "?" + urlencode(params)
+
+
+def exchange_pkce_code(raw_code, verifier):
+    code = (raw_code or "").strip()
+    if code.startswith("http://") or code.startswith("https://"):
+        parsed_q = parse_qs(urlparse(code).query)
+        if parsed_q.get("code"):
+            code = parsed_q["code"][0].strip()
+    if not code:
+        raise Failure("请输入 Google 授权页面显示的授权码。")
+    client_id, client_secret = oauth_client_credentials()
+    body = urlencode({
+        "code": code,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": REMOTE_REDIRECT_URI,
+        "grant_type": "authorization_code",
+        "code_verifier": verifier,
+    }).encode("utf-8")
+    req = Request(
+        OAUTH_TOKEN_URI,
+        data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urlopen(req, timeout=25) as resp:
+            tok = json.load(resp)
+    except HTTPError as exc:
+        raise Failure(f"授权码无效或已过期 (HTTP {exc.code})，请重新点击打开授权页面获取新授权码。")
+    if not tok.get("access_token"):
+        raise Failure("Google 未返回有效的访问令牌，请重试。")
+    scopes = tok.get("scope", "").split() or list(PUBLIC_SCOPES)
+    cred = {
+        "token": tok["access_token"],
+        "refresh_token": tok.get("refresh_token"),
+        "token_uri": OAUTH_TOKEN_URI,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "scopes": scopes,
+        "universe_domain": "googleapis.com",
+        "account": "",
+    }
+    if tok.get("id_token"):
+        cred["id_token"] = tok["id_token"]
+    if tok.get("expires_in"):
+        exp = datetime.now(timezone.utc) + timedelta(seconds=int(tok["expires_in"]))
+        cred["expiry"] = exp.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return json.dumps(cred)
 
 
 def dispatch(op, args):
@@ -276,31 +390,29 @@ def dispatch(op, args):
         if not active():
             return {"active": False, "email": None}
         return {"active": True, "email": email(access("active"))}
-    if op in ("begin-add", "begin-login"):
-        if op == "begin-login" and get("add-flow"):
-            return {"url": json.loads(get("add-flow"))["url"]}
-        begin_add(clear=op == "begin-add")
-        if op == "begin-login":
-            try:
-                flow = login_flow()
-                url, _ = flow.authorization_url(prompt="consent", token_usage="remote")
-                put("add-flow", json.dumps({"verifier": flow.code_verifier, "url": url}))
-                return {"url": url}
-            except Exception:
-                rollback()
-                raise
+    if op == "begin-add":
+        begin_add(clear=True)
+    elif op == "begin-login":
+        if get("add-backup") is None:
+            put("add-backup", json.dumps(slots()))
+        try:
+            verifier, url = build_pkce_login_url()
+            put("add-flow", json.dumps({"verifier": verifier, "url": url}))
+            return {"url": url}
+        except Exception:
+            rollback()
+            raise
     elif op == "rollback-add":
         rollback()
     elif op in ("adopt", "finish-add", "complete-login"):
         if op != "adopt" and get("add-backup") is None:
-            raise Failure("No account sign-in is pending.")
+            raise Failure("登录会话已重置，请重新点击「打开 Google 授权页」。")
         if op == "complete-login":
-            verifier = get("add-flow")
-            if not verifier:
-                raise Failure("Start a browser sign-in first.")
-            flow = login_flow(json.loads(verifier)["verifier"])
-            flow.fetch_token(code=sys.stdin.read().strip())
-            set_slots(flow.credentials.to_json(), None)
+            flow_raw = get("add-flow")
+            if not flow_raw:
+                raise Failure("请先点击打开 Google 授权页面。")
+            cred_json = exchange_pkce_code(sys.stdin.read(), json.loads(flow_raw)["verifier"])
+            set_slots(cred_json, None)
         info = access("active")
         addr = email(info)
         if not addr:

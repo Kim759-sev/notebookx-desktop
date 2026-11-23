@@ -1,3 +1,4 @@
+import { Button } from './components/ui/button';
 import { createPortal } from 'react-dom';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -48,8 +49,8 @@ function Brand() {
   return (
     <div className="brand">
       <svg width="35" height="35" viewBox="0 0 36 36" fill="none" aria-hidden="true">
-        <rect width="36" height="36" rx="9" fill="#91E9BE" />
-        <path fill="#10392E" d="M7 25.5V11l4.9-2.8 11.4 13V10.7l5.7-3.2v17l-5.1 2.9-11.3-13v8z" />
+        <rect width="36" height="36" rx="9" fill="var(--text)" />
+        <path fill="var(--bg)" d="M7 25.5V11l4.9-2.8 11.4 13V10.7l5.7-3.2v17l-5.1 2.9-11.3-13v8z" />
       </svg>
       <span>
         Notebook<span className="brand-x">X</span>
@@ -162,8 +163,10 @@ export default function App() {
   useEffect(() => {
     const mq = matchMedia('(prefers-color-scheme: dark)');
     const apply = () => {
-      document.documentElement.dataset.theme =
+      const resolved =
         theme === 'system' ? (mq.matches ? 'dark' : 'light') : theme;
+      document.documentElement.dataset.theme = resolved;
+      document.documentElement.classList.toggle('dark', resolved === 'dark');
     };
     apply();
     mq.addEventListener('change', apply);
@@ -209,7 +212,7 @@ export default function App() {
         {loadError ? (
           <>
             <p role="alert">{loadError}</p>
-            <button onClick={() => void refresh().catch(failed)}>{t('Retry')}</button>
+            <Button variant="outline" onClick={() => void refresh().catch(failed)}>{t('Retry')}</Button>
           </>
         ) : (
           <p>{t('Loading workspace…')}</p>
@@ -224,7 +227,7 @@ export default function App() {
   const online = data.env.gatewayRunning;
   const plan = account?.planTier?.toUpperCase();
   const navItem = (item: (typeof navigation)[number]) => (
-    <button
+    <Button variant="ghost"
       className={'nav-item ' + (item.id === page ? 'current' : '')}
       key={item.id}
       aria-current={item.id === page ? 'page' : undefined}
@@ -234,7 +237,7 @@ export default function App() {
       <item.icon size={18} />
       <span>{t(item.label)}</span>
       {item.id === page && <i className="nav-dot" />}
-    </button>
+    </Button>
   );
   const previewName = !isDesktop() && new URLSearchParams(location.search).get('runtimePreview');
   return (
@@ -244,7 +247,7 @@ export default function App() {
           <RuntimePreview name={previewName} />
         ) : (
           <>
-            {open && <button className="scrim" aria-label={t('Close')} onClick={() => setOpen(false)} />}
+            {open && <Button variant="ghost" className="scrim" aria-label={t('Close')} onClick={() => setOpen(false)} />}
             <aside className={'sidebar ' + (open ? 'shown' : '')}>
               <Brand />
               <div className="sidebar-nav">
@@ -272,14 +275,14 @@ export default function App() {
             </aside>
             <div className="main-shell">
               <header className="topbar">
-                <button
+                <Button variant="ghost" size="icon"
                   className="mobile-menu icon-btn"
                   aria-label={t('Menu')}
                   onClick={() => setOpen(!open)}
                 >
                   <Menu />
-                </button>
-                <button
+                </Button>
+                <Button variant="ghost"
                   className="account-btn"
                   onClick={() => navigate('accounts')}
                   title={account?.email ?? t('No account')}
@@ -289,7 +292,7 @@ export default function App() {
                   </span>
                   <span className="account-name">{account?.email ?? t('No account')}</span>
                   {plan && <span className="tier">{plan.startsWith('CO ') ? plan : 'CO ' + plan}</span>}
-                </button>
+                </Button>
                 <div className="usage-metrics">
                   {[
                     ['Balance', account?.balanceCcu, 'CCU'],
@@ -391,7 +394,7 @@ export default function App() {
                   {loadError && (
                     <div role="alert" className="notice bad">
                       {loadError}
-                      <button onClick={() => void refresh().catch(failed)}>{t('Retry')}</button>
+                      <Button variant="outline" onClick={() => void refresh().catch(failed)}>{t('Retry')}</Button>
                     </div>
                   )}
                   <fieldset className="page" disabled={busy}>
@@ -416,11 +419,11 @@ export default function App() {
             >
               <span>{toast.error ? <CircleAlert size={18} /> : <CheckCircle2 size={18} />}</span>
               {toast.text}
-              <button className="icon-btn" aria-label={t('Close')} onClick={() => setToast(null)}>
+              <Button variant="outline" size="icon" aria-label={t('Close')} onClick={() => setToast(null)}>
                 <X size={15} />
-              </button>
+              </Button>
             </div>,
-            document.querySelector('dialog[open]') ?? document.body,
+            document.querySelector('[data-slot="dialog-popup"]') ?? document.body,
           )}
       </div>
     </WorkContext.Provider>

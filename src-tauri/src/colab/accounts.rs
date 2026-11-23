@@ -181,10 +181,12 @@ pub async fn start_oauth_login(
     _app_data: &Path,
     _existing_ids: &[String],
 ) -> Result<String, String> {
-    account_helper(&["begin-login"], None).await?["url"]
+    let url = account_helper(&["begin-login"], None).await?["url"]
         .as_str()
         .map(str::to_owned)
-        .ok_or("Missing Google consent URL.".into())
+        .ok_or("Missing Google consent URL.")?;
+    let _ = open::that(&url);
+    Ok(url)
 }
 
 fn account(id: &str, reply: Value) -> Result<GoogleAccount, String> {

@@ -1,3 +1,8 @@
+import { Textarea } from '../components/ui/textarea';
+import { Button } from '../components/ui/button';
+import { Table } from '../components/ui/table';
+import { Input } from '../components/ui/input';
+import { Select } from '../components/ui/select';
 import { useState, type FormEvent } from 'react';
 import {
   ArrowDownToLine,
@@ -100,7 +105,7 @@ export default function Models() {
         icon={ScanLine}
         actions={<FileImport label="Import JSON" load={check} />}
       >
-        <textarea
+        <Textarea spellCheck={false} footer={<>{raw.length} {t('characters')}</>}
           className="code-input"
           aria-label={t('Paste workflow JSON')}
           placeholder={t('Paste workflow JSON')}
@@ -112,14 +117,14 @@ export default function Models() {
           }}
         />
         <div className="actions">
-          <button className="primary" disabled={!raw.trim()} onClick={() => check(raw, name)}>
+          <Button variant="default" disabled={!raw.trim()} onClick={() => check(raw, name)}>
             <ScanLine />
             {t('Scan workflow')}
-          </button>
-          <button onClick={() => check(sample, 'flux-example.json')}>
+          </Button>
+          <Button variant="outline" onClick={() => check(sample, 'flux-example.json')}>
             <FileJson />
             {t('Load and scan example')}
-          </button>
+          </Button>
         </div>
         {scan && (
           <form className="stack line-top" onSubmit={enqueue}>
@@ -136,7 +141,7 @@ export default function Models() {
               {t('Required nodes')} · {scan.requiredCustomNodes.join(', ') || '—'}
             </p>
             <div className="table-wrap">
-              <table>
+              <Table>
                 <thead>
                   <tr>
                     {['Filename', 'Category', 'Status', 'Source URL'].map((l) => (
@@ -161,7 +166,7 @@ export default function Models() {
                         {m.presentOnDrive ? (
                           <code>{m.matchedDrivePath ?? '—'}</code>
                         ) : (
-                          <input
+                          <Input
                             required
                             type="url"
                             aria-label={m.filename + ' URL'}
@@ -175,16 +180,16 @@ export default function Models() {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </Table>
             </div>
             {missing.some((m) => !sources[m.filename]) && (
               <small>{t('Supply a source URL for each missing model.')}</small>
             )}
             <div>
-              <button disabled={!missing.length}>
+              <Button variant="outline" type="submit" disabled={!missing.length}>
                 <ListPlus />
                 {t('Queue all missing models')}
-              </button>
+              </Button>
             </div>
           </form>
         )}
@@ -216,7 +221,7 @@ export default function Models() {
         >
           <div className="form-grid">
             <Field label="Filename">
-              <input
+              <Input
                 required
                 pattern={'[^/\\\\]+'}
                 value={filename}
@@ -225,7 +230,7 @@ export default function Models() {
               />
             </Field>
             <Field label="Source URL">
-              <input
+              <Input
                 required
                 pattern="https?://.+"
                 type="url"
@@ -235,14 +240,14 @@ export default function Models() {
               />
             </Field>
             <Field label="Category">
-              <select value={cat} onChange={(e) => setCat(e.target.value as ModelCategory)}>
+              <Select value={cat} onChange={(e) => setCat(e.target.value as ModelCategory)}>
                 {categories.map((c) => (
                   <option key={c}>{c}</option>
                 ))}
-              </select>
+              </Select>
             </Field>
             <Field label="Drive folder (relative to root)">
-              <input
+              <Input
                 required
                 pattern="(?!/)(?!.*\\.\\.(?:/|$)).+"
                 title={data.settings.defaultDriveRoot}
@@ -252,10 +257,10 @@ export default function Models() {
             </Field>
           </div>
           <div>
-            <button>
+            <Button variant="outline" type="submit">
               <Plus />
               {t('Add to queue')}
-            </button>
+            </Button>
           </div>
         </form>
       </Panel>
@@ -267,17 +272,16 @@ export default function Models() {
         <div className="saver">
           <CloudDownload size={24} />
           <div className="actions">
-            <button
-              className="primary"
+            <Button variant="default"
               disabled={!queued}
               onClick={() =>
                 void run(() => api('start_model_downloads', { useCpuMode: true, sessionName: null }))
               }
             >
               {t('Start CPU downloads to 30 TB Drive')}
-            </button>
+            </Button>
             {sessions.length > 1 && (
-              <select
+              <Select
                 aria-label={t('Session')}
                 value={session?.name ?? ''}
                 onChange={(e) => setSelected(e.target.value)}
@@ -285,9 +289,9 @@ export default function Models() {
                 {sessions.map((s) => (
                   <option key={s.id}>{s.name}</option>
                 ))}
-              </select>
+              </Select>
             )}
-            <button
+            <Button variant="outline"
               disabled={!session || !queued}
               onClick={() =>
                 void run(() =>
@@ -299,7 +303,7 @@ export default function Models() {
               }
             >
               {t('Download on current instance')}
-            </button>
+            </Button>
           </div>
         </div>
         {!data.downloads.length ? (
@@ -318,13 +322,12 @@ export default function Models() {
                 label={d.status}
                 tone={d.status === 'failed' ? 'red' : d.status === 'completed' ? 'green' : 'neutral'}
               />
-              <button
-                className="icon-btn"
+              <Button variant="outline" size="icon"
                 aria-label={t('Delete') + ' ' + d.filename}
                 onClick={() => void run(() => api('remove_model_download', { taskId: d.id }))}
               >
                 <Trash2 />
-              </button>
+              </Button>
             </div>
           ))
         )}
@@ -335,7 +338,7 @@ export default function Models() {
         actions={
           <label className="search">
             <Search size={15} />
-            <input
+            <Input
               aria-label={t('Search models')}
               placeholder={t('Search models')}
               value={q}
@@ -346,7 +349,7 @@ export default function Models() {
       >
         {inventory.length ? (
           <div className="table-wrap">
-            <table>
+            <Table>
               <thead>
                 <tr>
                   {['Filename', 'Category', 'Drive destination', 'Size'].map((l) => (
@@ -366,7 +369,7 @@ export default function Models() {
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </Table>
           </div>
         ) : (
           <Empty label="No matching models" />

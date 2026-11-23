@@ -1,5 +1,10 @@
-import { createContext, useContext, useEffect, useRef, type ReactNode } from 'react';
-import { X, Check, Circle, type LucideIcon } from 'lucide-react';
+import { Badge as StatusBadge } from './ui/badge';
+import { Card } from './ui/card';
+import { buttonVariants } from './ui/button';
+import { Input } from './ui/input';
+import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogPopup } from './ui/dialog';
+import { createContext, useContext, type ReactNode } from 'react';
+import { Check, Circle, type LucideIcon } from 'lucide-react';
 import type { AppSettings, CostGuardPolicy, DashboardSnapshot } from '../lib/types';
 export type Page = 'studio' | 'models' | 'api' | 'accounts' | 'plugins' | 'settings';
 export interface Workspace {
@@ -54,7 +59,7 @@ export function Panel({
 }) {
   const { t } = useWork();
   return (
-    <section className={'panel ' + className}>
+    <Card className={'panel ' + className}>
       <div className="section-head">
         <h2>
           {Icon && <Icon size={17} />} {t(title)}
@@ -62,7 +67,7 @@ export function Panel({
         {actions}
       </div>
       {children}
-    </section>
+    </Card>
   );
 }
 export function Field({
@@ -111,52 +116,29 @@ export function Badge({
 }) {
   const { t } = useWork();
   return (
-    <span className={'badge ' + tone}>
+    <StatusBadge className={'badge border-border ' + tone}>
       {dot && <i className="dot" />}
       {t(label)}
-    </span>
+    </StatusBadge>
   );
 }
-export function Modal({
-  title,
-  close,
-  children,
-}: {
+export function Modal({ title, description, close, children }: {
   title: string;
+  description?: string;
   close: () => void;
   children: ReactNode;
 }) {
-  const { t } = useWork();
-  const ref = useRef<HTMLDialogElement>(null);
-  useEffect(() => {
-    const el = ref.current;
-    el?.showModal();
-    return () => el?.close();
-  }, []);
+  const { t, busy } = useWork();
   return (
-    <dialog
-      ref={ref}
-      aria-label={t(title)}
-      onCancel={(e) => {
-        e.preventDefault();
-        close();
-      }}
-      onClick={(e) => {
-        if (e.target === ref.current) {
-          const r = ref.current.getBoundingClientRect();
-          if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom)
-            close();
-        }
-      }}
-    >
-      <div className="modal-head">
-        <h2>{t(title)}</h2>
-        <button type="button" className="icon-btn" aria-label={t('Close')} onClick={close}>
-          <X size={17} />
-        </button>
-      </div>
-      {children}
-    </dialog>
+    <Dialog open onOpenChange={(open) => { if (!open && !busy) close(); }}>
+      <DialogPopup>
+        <DialogHeader closeLabel={t('Close')}>
+          <DialogTitle className="text-lg font-semibold tracking-tight">{t(title)}</DialogTitle>
+          {description && <DialogDescription className="text-sm text-muted-foreground">{t(description)}</DialogDescription>}
+        </DialogHeader>
+        <fieldset className="min-w-0 border-0 p-0" disabled={busy}>{children}</fieldset>
+      </DialogPopup>
+    </Dialog>
   );
 }
 export function GuardFields({
@@ -177,7 +159,7 @@ export function GuardFields({
       <div className="form-grid">
         {fields.map(([key, label]) => (
           <Field key={key} label={label}>
-            <input
+            <Input
               type="number"
               min="0"
               step={key.endsWith('Ccu') ? 'any' : 1}
@@ -205,7 +187,7 @@ export function External({ url, children }: { url: string; children: ReactNode }
     /* malformed endpoint */
   }
   return valid ? (
-    <a className="button" target="_blank" rel="noopener noreferrer" href={url}>
+    <a className={buttonVariants({ variant: 'outline' })} target="_blank" rel="noopener noreferrer" href={url}>
       {children}
     </a>
   ) : (
@@ -221,7 +203,7 @@ export function FileImport({
 }) {
   const { t, notify } = useWork();
   return (
-    <label className="button upload">
+    <label className={buttonVariants({ variant: 'outline', className: 'upload' })}>
       {t(label)}
       <input
         type="file"

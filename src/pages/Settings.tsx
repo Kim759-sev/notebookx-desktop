@@ -1,3 +1,7 @@
+import { Input } from '../components/ui/input';
+import { Button } from '../components/ui/button';
+import { Textarea } from '../components/ui/textarea';
+import { Tabs, TabsList, TabsTrigger, TabsPanel } from '../components/ui/tabs';
 import { useState } from 'react';
 import {
   CheckCircle2,
@@ -32,10 +36,10 @@ function Preferences() {
     >
       <div className="form-grid">
         <Field label="Drive root">
-          <input required value={root} onChange={(e) => setRoot(e.target.value)} />
+          <Input required value={root} onChange={(e) => setRoot(e.target.value)} />
         </Field>
         <Field label="DramaSmith URL">
-          <input
+          <Input
             type="url"
             required
             pattern="https?://.+"
@@ -47,10 +51,10 @@ function Preferences() {
       <Toggle label="Minimize to tray" checked={tray} onChange={setTray} />
       <Toggle label="Sync DramaSmith automatically" checked={sync} onChange={setSync} />
       <div>
-        <button>
+        <Button variant="outline" type="submit">
           <Save />
           {t('Save')}
-        </button>
+        </Button>
       </div>
     </form>
   );
@@ -76,7 +80,7 @@ function Secret({ name, label, exists }: { name: string; label: string; exists: 
       </div>
       <div className="actions">
         {name === 'rclone_config' ? (
-          <textarea
+          <Textarea
             aria-label={t(label)}
             className="grow"
             value={value}
@@ -86,7 +90,7 @@ function Secret({ name, label, exists }: { name: string; label: string; exists: 
             onChange={(e) => setValue(e.target.value)}
           />
         ) : (
-          <input
+          <Input
             aria-label={t(label)}
             className="grow"
             type="password"
@@ -96,7 +100,7 @@ function Secret({ name, label, exists }: { name: string; label: string; exists: 
             onChange={(e) => setValue(e.target.value)}
           />
         )}
-        <button disabled={!value.trim()}>{t('Save')}</button>
+        <Button variant="outline" type="submit" disabled={!value.trim()}>{t('Save')}</Button>
       </div>
     </form>
   );
@@ -126,14 +130,21 @@ export default function Settings() {
         title="Environment & setup"
         subtitle="Verify local dependencies, configure storage, and manage credentials."
       />
+      <Tabs defaultValue="setup" className="space-y-4">
+        <TabsList aria-label={t('Settings')}>
+          <TabsTrigger value="setup">{t('Setup checklist')}</TabsTrigger>
+          <TabsTrigger value="preferences">{t('Preferences')}</TabsTrigger>
+          <TabsTrigger value="secrets">{t('Secret vault')}</TabsTrigger>
+        </TabsList>
+        <TabsPanel value="setup" keepMounted>
       <Panel
         title="Setup checklist"
         icon={ListChecks}
         actions={
-          <button onClick={() => void run(() => api('check_environment'))}>
+          <Button variant="outline" onClick={() => void run(() => api('check_environment'))}>
             <RefreshCw />
             {t('Check environment')}
-          </button>
+          </Button>
         }
       >
         {checks.map(([label, ok, path]) => (
@@ -145,20 +156,24 @@ export default function Settings() {
             </div>
             <Badge label={ok ? 'Available' : 'Action needed'} tone={ok ? 'green' : 'amber'} />
             {label === 'google-colab-cli' && !ok && (
-              <button onClick={() => void run(() => api('install_colab_cli'))}>
+              <Button variant="outline" onClick={() => void run(() => api('install_colab_cli'))}>
                 <Download />
                 {t('Install Colab CLI')}
-              </button>
+              </Button>
             )}
             {label === 'Google authorization' && !ok && (
-              <button onClick={() => navigate('accounts')}>{t('Add Google account')}</button>
+              <Button variant="outline" onClick={() => navigate('accounts')}>{t('Add Google account')}</Button>
             )}
           </div>
         ))}
       </Panel>
+        </TabsPanel>
+        <TabsPanel value="preferences" keepMounted>
       <Panel title="Preferences" icon={FolderCog}>
         <Preferences />
       </Panel>
+        </TabsPanel>
+        <TabsPanel value="secrets" keepMounted>
       <Panel title="Secret vault" icon={KeyRound}>
         {!isDesktop() && <p>{t('Sandbox stores configuration flags only.')}</p>}
         <Secret name="hf_token" label="Hugging Face Token" exists={data.settings.hasHfToken} />
@@ -169,6 +184,8 @@ export default function Settings() {
           exists={data.settings.hasRcloneConfig}
         />
       </Panel>
+        </TabsPanel>
+      </Tabs>
     </>
   );
 }

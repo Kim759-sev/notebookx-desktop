@@ -1,3 +1,4 @@
+import { Select } from '../components/ui/select';
 import { useState } from 'react';
 import { ArrowUpRight, Braces, Cpu, Workflow } from 'lucide-react';
 import { Badge, Empty, External, Header, Panel, useWork } from '../components/workspace';
@@ -56,7 +57,7 @@ export default function RuntimePreview({ name }: { name: string }) {
               icon={Braces}
               actions={
                 w && (
-                  <select
+                  <Select
                     aria-label={t('Workflow templates')}
                     value={w.id}
                     onChange={(e) => setSelected(e.target.value)}
@@ -66,7 +67,7 @@ export default function RuntimePreview({ name }: { name: string }) {
                         {t(v.name)}
                       </option>
                     ))}
-                  </select>
+                  </Select>
                 )
               }
             >
