@@ -1,0 +1,31 @@
+id = "llama-cpp"
+version = "1.0.0"
+scriptPath = "worker.py"
+defaultAccelerator = "L4"
+minVramMib = 0
+highMem = false
+
+[name]
+en = "llama.cpp"
+"zh-CN" = "llama.cpp 模型服务"
+"zh-TW" = "llama.cpp 模型服務"
+[description]
+en = "Choose a GGUF for the allocated GPU and serve chat through llama.cpp."
+"zh-CN" = "按实际显存选择 GGUF 量化，提供聊天网页和 OpenAI 兼容接口。"
+"zh-TW" = "按實際顯存選擇 GGUF 量化，提供聊天網頁和 OpenAI 相容介面。"
+
+[[endpoints]]
+id = "chat"
+label = "Web Chat"
+port = 8080
+path = "/"
+healthPath = "/health"
+kind = "web"
+
+[[endpoints]]
+id = "openai"
+label = "OpenAI API"
+port = 8080
+path = "/v1"
+healthPath = "/health"
+kind = "api"

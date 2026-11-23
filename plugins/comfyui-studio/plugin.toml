@@ -1,0 +1,31 @@
+id = "comfyui-studio"
+version = "1.0.0"
+scriptPath = "bootstrap_comfy.py"
+defaultAccelerator = "L4"
+minVramMib = 20480
+highMem = false
+
+[name]
+en = "ComfyUI Studio"
+"zh-CN" = "云端 ComfyUI 工作室"
+"zh-TW" = "雲端 ComfyUI 工作室"
+[description]
+en = "Run Drive-backed ComfyUI workflows or prepare models on a CPU runtime."
+"zh-CN" = "在云端运行工作流，持久保存模型与作品，支持 CPU 提前下载。"
+"zh-TW" = "在雲端執行工作流，持久保存模型與作品，支援 CPU 預先下載。"
+
+[[endpoints]]
+id = "comfy"
+label = "ComfyUI"
+port = 8188
+path = "/"
+healthPath = "/system_stats"
+kind = "web"
+
+[[endpoints]]
+id = "management"
+label = "DramaSmith"
+port = 8189
+path = "/"
+healthPath = "/queue"
+kind = "management"
