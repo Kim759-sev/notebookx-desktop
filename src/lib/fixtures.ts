@@ -114,7 +114,7 @@ export function initialSnapshot(): DashboardSnapshot {
   const settings: AppSettings = {
     locale: 'zh-CN',
     theme: 'dark',
-    backendMode: 'mock',
+    backendMode: 'real',
     gatewayPort: 18188,
     autoWakeOnApiCall: true,
     dramaSmithApiUrl: 'http://127.0.0.1:8018',
@@ -203,29 +203,14 @@ export function initialSnapshot(): DashboardSnapshot {
       dramaSmithReachable: true,
       dramaSmithUrl: settings.dramaSmithApiUrl,
     },
-    accounts: [account],
+    accounts: [],
     profiles,
     sessions: [],
     tunnels: [],
     downloads: [],
     llamaDeployments: [],
     apiWorkflows: [workflow],
-    driveModels: [
-      {
-        filename: 'ae.safetensors',
-        relativePath: 'models/vae/ae.safetensors',
-        category: 'vae',
-        sizeBytes: 335300000,
-        updatedAt: null,
-      },
-      {
-        filename: 'clip_l.safetensors',
-        relativePath: 'models/text_encoders/clip_l.safetensors',
-        category: 'text_encoders',
-        sizeBytes: 246000000,
-        updatedAt: null,
-      },
-    ],
+    driveModels: [],
     plugins: [
       {
         id: 'llama.cpp',

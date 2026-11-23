@@ -1,4 +1,5 @@
 import { Button } from './components/ui/button';
+import { ChoiceMenu } from './components/ui/menu';
 import { createPortal } from 'react-dom';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -311,74 +312,45 @@ export default function App() {
                   </span>
                 </div>
                 <div className="top-controls">
-                  <label
-                    className={
-                      'select-pill mode ' + (data.settings.backendMode === 'mock' ? 'mock' : 'live')
+                  <ChoiceMenu<LocaleCode>
+                    ariaLabel={t('Language')}
+                    disabled={busy}
+                    value={locale}
+                    onChange={(next) => settings({ locale: next })}
+                    trigger={
+                      <>
+                        <Globe2 className="size-3.5 text-muted-foreground" />
+                        <span>{locale === 'zh-CN' ? '简体中文' : locale === 'zh-TW' ? '繁體中文' : 'English'}</span>
+                        <ChevronDown className="size-3 opacity-70" />
+                      </>
                     }
-                  >
-                    <span className="dot" />
-                    <select
-                      aria-label={t('Backend mode')}
-                      disabled={busy}
-                      value={data.settings.backendMode}
-                      onChange={(e) => {
-                        const mode = e.target.value as 'real' | 'mock';
-                        if (
-                          isDesktop() &&
-                          data.sessions.some((s) => s.state !== 'stopped' && !s.verifiedUnassigned)
-                        ) {
-                          notify(t('Release existing instances before switching backend modes.'), true);
-                          return;
-                        }
-                        if (
-                          mode === 'mock' ||
-                          !isDesktop() ||
-                          window.confirm(
-                            t('Switch to live Colab? Launching an instance may consume compute units.'),
-                          )
-                        )
-                          settings({ backendMode: mode });
-                      }}
-                    >
-                      <option value="real">{t('Live Colab')}</option>
-                      <option value="mock">{t('Mock sandbox')}</option>
-                    </select>
-                    <ChevronDown size={11} />
-                  </label>
-                  <label className="select-pill lang">
-                    <Globe2 size={14} />
-                    <select
-                      aria-label={t('Language')}
-                      value={locale}
-                      disabled={busy}
-                      onChange={(e) => settings({ locale: e.target.value as LocaleCode })}
-                    >
-                      <option value="zh-CN">简</option>
-                      <option value="zh-TW">繁</option>
-                      <option value="en">EN</option>
-                    </select>
-                    <ChevronDown size={10} />
-                  </label>
-                  <label
-                    className="theme-control"
-                    title={
-                      t('Theme') +
-                      ' · ' +
-                      t(theme === 'system' ? 'System theme' : theme === 'light' ? 'Light' : 'Dark')
+                    options={[
+                      { value: 'zh-CN', label: '简体中文' },
+                      { value: 'zh-TW', label: '繁體中文' },
+                      { value: 'en', label: 'English' },
+                    ]}
+                  />
+                  <ChoiceMenu<ThemeMode>
+                    ariaLabel={t('Theme')}
+                    disabled={busy}
+                    value={theme}
+                    onChange={(next) => settings({ theme: next })}
+                    trigger={
+                      <>
+                        <ThemeIcon className="size-3.5 text-muted-foreground" />
+                        <ChevronDown className="size-3 opacity-70" />
+                      </>
                     }
-                  >
-                    <ThemeIcon size={17} />
-                    <select
-                      aria-label={t('Theme')}
-                      disabled={busy}
-                      value={theme}
-                      onChange={(e) => settings({ theme: e.target.value as ThemeMode })}
-                    >
-                      <option value="dark">{t('Dark')}</option>
-                      <option value="light">{t('Light')}</option>
-                      <option value="system">{t('System theme')}</option>
-                    </select>
-                  </label>
+                    options={[
+                      { value: 'light', label: t('Light'), icon: <Sun className="size-3.5 text-muted-foreground" /> },
+                      { value: 'dark', label: t('Dark'), icon: <Moon className="size-3.5 text-muted-foreground" /> },
+                      {
+                        value: 'system',
+                        label: t('System theme'),
+                        icon: <Monitor className="size-3.5 text-muted-foreground" />,
+                      },
+                    ]}
+                  />
                 </div>
               </header>
               <main ref={scrollRef}>

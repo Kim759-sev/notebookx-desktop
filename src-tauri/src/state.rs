@@ -58,22 +58,44 @@ impl AppCore {
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok());
 
-        let initial_store = loaded.unwrap_or_else(|| {
+        let mut initial_store = loaded.unwrap_or_else(|| {
             let mut settings = AppSettings::default();
-            // Default to Real if colab CLI is already present, otherwise keep Real with clean guided setup
             settings.backendMode = BackendMode::Real;
             PersistedStore {
                 settings,
                 accounts: Vec::new(),
                 profiles: crate::comfy::default_workflow_profiles(),
                 sessions: Vec::new(),
-                driveModels: crate::comfy::default_drive_models_seed(),
+                driveModels: Vec::new(),
                 downloads: Vec::new(),
                 apiWorkflows: crate::comfy::default_saved_api_workflows(),
                 llamaDeployments: Vec::new(),
                 completedGraphs: HashMap::new(),
             }
         });
+
+        // Always start in Real Google Colab mode and purge any leftover demo/mock entries
+        initial_store.settings.backendMode = BackendMode::Real;
+        initial_store.accounts.retain(|a| {
+            !a.id.starts_with("demo-")
+                && !a.id.starts_with("mock-")
+                && a.email != "studio.ultra20x@gmail.com"
+                && a.email != "backup.render@gmail.com"
+        });
+        initial_store.sessions.retain(|s| {
+            !s.accountId.starts_with("demo-")
+                && !s.accountId.starts_with("mock-")
+                && !s.endpoint.starts_with("colab-")
+        });
+        initial_store
+            .driveModels
+            .retain(|m| !(m.sizeBytes == 0 && m.updatedAt.is_none()));
+        initial_store
+            .llamaDeployments
+            .retain(|d| !d.id.starts_with("llama-") || !d.logs.iter().any(|l| l.contains("已根据")));
+        if let Ok(raw) = serde_json::to_string_pretty(&initial_store) {
+            let _ = std::fs::write(&store_path, raw);
+        }
 
         let minimize = initial_store.settings.minimizeToTray;
         let http_client = reqwest::Client::builder()
@@ -308,37 +330,7 @@ impl AppCore {
             }
         }
 
-        let mut accounts = st.accounts.clone();
-        if st.settings.backendMode == BackendMode::Mock && accounts.is_empty() {
-            accounts = vec![
-                GoogleAccount {
-                    id: "demo-pro-plus".to_string(),
-                    email: "studio.ultra20x@gmail.com".to_string(),
-                    displayName: Some("Google AI Ultra 20x · 主力号".to_string()),
-                    isActive: true,
-                    planTier: "PRO+".to_string(),
-                    balanceCcu: Some(1864.5),
-                    burnRateHourly: Some(0.0),
-                    hoursRemaining: None,
-                    activeAssignmentsCount: 0,
-                    lastUpdatedAt: Some(Utc::now().to_rfc3339()),
-                    usageStale: false,
-                },
-                GoogleAccount {
-                    id: "demo-pro-backup".to_string(),
-                    email: "backup.render@gmail.com".to_string(),
-                    displayName: Some("备用渲染账号".to_string()),
-                    isActive: false,
-                    planTier: "PRO".to_string(),
-                    balanceCcu: Some(200.0),
-                    burnRateHourly: Some(0.0),
-                    hoursRemaining: None,
-                    activeAssignmentsCount: 0,
-                    lastUpdatedAt: Some(Utc::now().to_rfc3339()),
-                    usageStale: false,
-                },
-            ];
-        }
+        let accounts = st.accounts.clone();
 
         DashboardSnapshot {
             env,
