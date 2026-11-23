@@ -10,8 +10,9 @@ pub use accounts::{
 };
 pub use session_runner::{
     deploy_watchdog, deploy_watchdog_with_policy, exec_python_on_session, mount_google_drive,
-    mount_google_drive_with_consent, provision_with_vram_guard, update_watchdog_deadline,
-    verified_safe_stop, MountResult, ProvisionedSession, ASSETS_WATCHDOG_PY,
+    mount_google_drive_notifying, mount_google_drive_with_consent, provision_with_vram_guard,
+    update_watchdog_deadline, verified_safe_stop, MountResult, ProvisionedSession,
+    ASSETS_WATCHDOG_PY,
 };
 pub use toolchain::{detect_environment, ensure_ssh_key, install_colab_cli};
 pub use tunnel::{start_tunnel, TunnelHandle};

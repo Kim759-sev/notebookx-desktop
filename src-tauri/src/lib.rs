@@ -27,7 +27,7 @@ async fn get_dashboard_snapshot(
 
 #[tauri::command]
 async fn check_environment(core: State<'_, Arc<AppCore>>) -> Result<EnvironmentStatus, String> {
-    Ok(core.check_environment().await)
+    Ok(core.check_environment_fresh().await)
 }
 
 #[tauri::command]
@@ -114,7 +114,7 @@ async fn launch_profile_session(
     core: State<'_, Arc<AppCore>>,
     profile_id: String,
 ) -> Result<ColabSession, String> {
-    core.launch_profile_session(&profile_id).await
+    core.inner().start_profile_session_async(&profile_id).await
 }
 
 #[tauri::command]

@@ -549,10 +549,10 @@ def run_scoped_cli(account, argv):
 
 
 if __name__ == "__main__":
-    logging.disable(logging.CRITICAL)
     if sys.argv[1:2] == ["_cli"]:
         run_scoped_cli(sys.argv[2], sys.argv[3:])
     else:
+        logging.disable(logging.CRITICAL)
         failed = False
         try:
             with open(os.devnull, "w") as quiet, redirect_stdout(quiet), redirect_stderr(quiet), locked():

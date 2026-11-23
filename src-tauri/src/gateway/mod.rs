@@ -176,7 +176,7 @@ async fn proxy_management(
     req: Request,
 ) -> Response {
     let port = st.core.active_management_local_port().await.unwrap_or(8189);
-    forward_http_request(&st.core.http_client, port, &format!("/{rest}"), req).await
+    forward_http_request(&st.core.local_http_client, port, &format!("/{rest}"), req).await
 }
 
 async fn proxy_comfy(State(st): State<GatewayState>, req: Request) -> Response {
@@ -202,7 +202,7 @@ async fn proxy_comfy(State(st): State<GatewayState>, req: Request) -> Response {
     }
 
     let port = st.core.active_comfy_local_port().await.unwrap_or(8188);
-    forward_http_request(&st.core.http_client, port, &path_and_query, req).await
+    forward_http_request(&st.core.local_http_client, port, &path_and_query, req).await
 }
 
 async fn forward_http_request(

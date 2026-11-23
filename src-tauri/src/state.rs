@@ -38,10 +38,12 @@ struct PersistedStore {
 pub struct AppCore {
     pub data_dir: PathBuf,
     pub http_client: reqwest::Client,
+    pub local_http_client: reqwest::Client,
     store: RwLock<PersistedStore>,
     tunnels: RwLock<Vec<PortTunnel>>,
     tunnel_stops: Mutex<HashMap<String, crate::colab::tunnel::TunnelHandle>>,
     gateway_bound_url: RwLock<Option<String>>,
+    env_cache: RwLock<Option<(std::time::Instant, EnvironmentStatus)>>,
     last_activity_epoch: RwLock<i64>,
     minimize_to_tray_flag: AtomicBool,
 }
@@ -102,14 +104,21 @@ impl AppCore {
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap_or_default();
+        let local_http_client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_default();
 
         Self {
             data_dir,
             http_client,
+            local_http_client,
             store: RwLock::new(initial_store),
             tunnels: RwLock::new(Vec::new()),
             tunnel_stops: Mutex::new(HashMap::new()),
             gateway_bound_url: RwLock::new(None),
+            env_cache: RwLock::new(None),
             last_activity_epoch: RwLock::new(Utc::now().timestamp()),
             minimize_to_tray_flag: AtomicBool::new(minimize),
         }
@@ -187,7 +196,7 @@ impl AppCore {
             if sess.comfyReady && mode == BackendMode::Real {
                 if let Some(url) = &sess.comfyLocalUrl {
                     if let Ok(resp) = self
-                        .http_client
+                        .local_http_client
                         .get(format!("{url}/queue"))
                         .timeout(std::time::Duration::from_secs(4))
                         .send()
@@ -286,6 +295,15 @@ impl AppCore {
     }
 
     pub async fn check_environment(&self) -> EnvironmentStatus {
+        if let Some((cached_at, env)) = self.env_cache.read().await.clone() {
+            if cached_at.elapsed() < std::time::Duration::from_secs(30) {
+                return env;
+            }
+        }
+        self.check_environment_fresh().await
+    }
+
+    pub async fn check_environment_fresh(&self) -> EnvironmentStatus {
         let (mode, gw_port, ds_url) = {
             let st = self.store.read().await;
             (
@@ -298,7 +316,7 @@ impl AppCore {
         let gateway_url = gw_bound
             .clone()
             .unwrap_or_else(|| format!("http://127.0.0.1:{gw_port}"));
-        let ds_ok = crate::comfy::check_dramasmith_reachable(&self.http_client, &ds_url).await;
+        let ds_ok = crate::comfy::check_dramasmith_reachable(&self.local_http_client, &ds_url).await;
 
         let mut env = crate::colab::toolchain::detect_environment(
             mode,
@@ -309,6 +327,7 @@ impl AppCore {
         )
         .await;
         env.backendMode = mode;
+        *self.env_cache.write().await = Some((std::time::Instant::now(), env.clone()));
         env
     }
 
@@ -352,7 +371,7 @@ impl AppCore {
         if mode == BackendMode::Real {
             crate::colab::toolchain::install_colab_cli().await?;
         }
-        Ok(self.check_environment().await)
+        Ok(self.check_environment_fresh().await)
     }
 
     pub async fn update_settings(&self, mut next: AppSettings) -> Result<AppSettings, String> {
@@ -680,9 +699,103 @@ impl AppCore {
         self.launch_profile_session(profile_id).await
     }
 
+    pub async fn start_profile_session_async(
+        self: &Arc<Self>,
+        profile_id: &str,
+    ) -> Result<ColabSession, String> {
+        let mode = self.store.read().await.settings.backendMode;
+        if mode == BackendMode::Mock {
+            return self.launch_profile_session(profile_id).await;
+        }
+        let session = self.prepare_session_record(profile_id).await?;
+        let core = self.clone();
+        let prof_id = profile_id.to_string();
+        let sess_name = session.name.clone();
+        tokio::spawn(async move {
+            let _ = core.execute_real_launch_pipeline(&prof_id, &sess_name).await;
+        });
+        Ok(session)
+    }
+
     pub async fn launch_profile_session(&self, profile_id: &str) -> Result<ColabSession, String> {
+        let mode = self.store.read().await.settings.backendMode;
+        let mut session = self.prepare_session_record(profile_id).await?;
+        if mode == BackendMode::Mock {
+            let profile = self
+                .store
+                .read()
+                .await
+                .profiles
+                .iter()
+                .find(|p| p.id == profile_id)
+                .cloned()
+                .ok_or_else(|| format!("未找到工作流启动档位 '{profile_id}'"))?;
+            let gpu_label = match profile.accelerator {
+                AcceleratorKind::G4 => "NVIDIA RTX PRO 6000 Blackwell Server Edition (96 GB)",
+                AcceleratorKind::A100 => {
+                    if profile.minVramGb >= 70 {
+                        "NVIDIA A100-SXM4-80GB (第 2 次抽卡命中 80GB)"
+                    } else {
+                        "NVIDIA A100-SXM4-40GB"
+                    }
+                }
+                AcceleratorKind::H100 => "NVIDIA H100 80GB HBM3",
+                AcceleratorKind::L4 => "NVIDIA L4 (24 GB)",
+                AcceleratorKind::T4 => "NVIDIA Tesla T4 (15 GB)",
+                AcceleratorKind::Cpu => "Google Colab High-Throughput CPU (零显卡积分)",
+                AcceleratorKind::V5e1 => "Cloud TPU v5e-1",
+                AcceleratorKind::V6e1 => "Cloud TPU v6e-1",
+            };
+            let vram = if profile.accelerator == AcceleratorKind::A100 && profile.minVramGb >= 70 {
+                81_920
+            } else {
+                profile.accelerator.nominal_vram_mib()
+            };
+
+            session.endpoint = format!("mock-{}", &session.id[..6]);
+            session.gpuName = Some(gpu_label.to_string());
+            session.vramTotalMib = Some(vram);
+            session.vramUsedMib = Some(if vram > 0 { 14_200.min(vram / 2) } else { 0 });
+            session.driveMounted = profile.driveMountMode != DriveMountMode::Disabled;
+            session.watchdogActive = true;
+            session.comfyLocalUrl = Some(format!("http://127.0.0.1:{}", profile.comfyPort));
+            if let Some(mp) = profile.managementPort {
+                session.managementLocalUrl = Some(format!("http://127.0.0.1:{mp}"));
+            }
+            session.comfyReady = profile.startupMode != ProfileStartupMode::CpuPreDownload;
+            session.loadedRequiredNodes = profile.requiredNodes.clone();
+            session.state = SessionLifecycle::Ready;
+            for stg in session.stages.iter_mut() {
+                stg.status = StageStatus::Completed;
+            }
+            self.tunnels.write().await.push(PortTunnel {
+                id: format!("tun-{}", profile.comfyPort),
+                sessionName: session.name.clone(),
+                remotePort: profile.comfyPort,
+                localPort: profile.comfyPort,
+                label: "ComfyUI 主服务".to_string(),
+                status: TunnelStatus::Connected,
+                healthy: Some(true),
+                healthPath: Some("/system_stats".to_string()),
+                reconnectCount: 0,
+                lastError: None,
+            });
+            {
+                let mut st = self.store.write().await;
+                if let Some(s) = st.sessions.iter_mut().find(|x| x.name == session.name) {
+                    *s = session.clone();
+                }
+            }
+            self.persist().await;
+            return Ok(session);
+        }
+        self.execute_real_launch_pipeline(profile_id, &session.name)
+            .await
+    }
+
+    async fn prepare_session_record(&self, profile_id: &str) -> Result<ColabSession, String> {
         self.touch_activity().await;
-        let (mode, profile, active_acc, ds_url, auto_sync_ds) = {
+        let (mode, profile, active_acc) = {
             let st = self.store.read().await;
             let prof = st
                 .profiles
@@ -691,14 +804,12 @@ impl AppCore {
                 .cloned()
                 .ok_or_else(|| format!("未找到工作流启动档位 '{profile_id}'"))?;
             let acc = st.accounts.iter().find(|a| a.isActive).cloned();
-            (
-                st.settings.backendMode,
-                prof,
-                acc,
-                st.settings.dramaSmithApiUrl.clone(),
-                st.settings.autoSyncDramaSmith,
-            )
+            (st.settings.backendMode, prof, acc)
         };
+
+        if mode == BackendMode::Real && active_acc.is_none() {
+            return Err("请先在「账号与会话」页面关联你的 Google 账号后再启动实例".to_string());
+        }
 
         let session_short = &Uuid::new_v4().to_string()[..6];
         let session_name = format!("nbx-{}-{session_short}", profile.accelerator_slug());
@@ -712,7 +823,10 @@ impl AppCore {
                 id: "provision".to_string(),
                 label: format!("分配 {:?} 算力与显存校验", profile.accelerator),
                 status: StageStatus::Running,
-                detail: Some("正在请求 Google Colab 分配实例...".to_string()),
+                detail: Some(format!(
+                    "正在向 Google Colab 请求 {:?} 实例（首次冷分配通常需 20~65 秒）...",
+                    profile.accelerator
+                )),
             },
             StartupStage {
                 id: "mount_drive".to_string(),
@@ -743,14 +857,14 @@ impl AppCore {
         let (account_id, account_email) = active_acc
             .as_ref()
             .map(|a| (a.id.clone(), a.email.clone()))
-            .unwrap_or_else(|| ("demo-pro-plus".to_string(), "studio.ultra20x@gmail.com".to_string()));
+            .unwrap_or_else(|| ("mock-test".to_string(), "mock@test.local".to_string()));
 
-        let mut session = ColabSession {
+        let session = ColabSession {
             id: Uuid::new_v4().to_string(),
-            name: session_name.clone(),
-            accountId: account_id.clone(),
+            name: session_name,
+            accountId: account_id,
             accountEmail: account_email,
-            endpoint: format!("colab-{session_short}"),
+            endpoint: String::new(),
             accelerator: profile.accelerator,
             gpuName: None,
             vramTotalMib: None,
@@ -779,122 +893,47 @@ impl AppCore {
             verifiedUnassigned: false,
             lastError: None,
             logs: vec![format!(
-                "[NotebookX] 启动档位「{}」({:?})",
-                profile.name, profile.accelerator
+                "[{}] 已发起启动任务：{} ({:?})",
+                Utc::now().format("%H:%M:%S"),
+                profile.name,
+                profile.accelerator
             )],
         };
 
         {
             let mut st = self.store.write().await;
             st.sessions
-                .retain(|s| s.state != SessionLifecycle::Stopped);
+                .retain(|s| !matches!(s.state, SessionLifecycle::Stopped | SessionLifecycle::Error));
             st.sessions.insert(0, session.clone());
         }
+        self.persist().await;
+        Ok(session)
+    }
 
-        if mode == BackendMode::Mock {
-            // Simulate fast realistic 5-stage provisioning for UI testing
-            let gpu_label = match profile.accelerator {
-                AcceleratorKind::G4 => "NVIDIA RTX PRO 6000 Blackwell Server Edition (96 GB)",
-                AcceleratorKind::A100 => {
-                    if profile.minVramGb >= 70 {
-                        "NVIDIA A100-SXM4-80GB (第 2 次抽卡命中 80GB)"
-                    } else {
-                        "NVIDIA A100-SXM4-40GB"
-                    }
-                }
-                AcceleratorKind::H100 => "NVIDIA H100 80GB HBM3",
-                AcceleratorKind::L4 => "NVIDIA L4 (24 GB)",
-                AcceleratorKind::T4 => "NVIDIA Tesla T4 (15 GB)",
-                AcceleratorKind::Cpu => "Google Colab High-Throughput CPU (零显卡积分)",
-                AcceleratorKind::V5e1 => "Cloud TPU v5e-1",
-                AcceleratorKind::V6e1 => "Cloud TPU v6e-1",
-            };
-            let vram = if profile.accelerator == AcceleratorKind::A100 && profile.minVramGb >= 70 {
-                81_920
-            } else {
-                profile.accelerator.nominal_vram_mib()
-            };
-
-            session.gpuName = Some(gpu_label.to_string());
-            session.vramTotalMib = Some(vram);
-            session.vramUsedMib = Some(if vram > 0 { 14_200.min(vram / 2) } else { 0 });
-            session.driveMounted = profile.driveMountMode != DriveMountMode::Disabled;
-            session.watchdogActive = true;
-            session.comfyLocalUrl = Some(format!("http://127.0.0.1:{}", profile.comfyPort));
-            if let Some(mp) = profile.managementPort {
-                session.managementLocalUrl = Some(format!("http://127.0.0.1:{mp}"));
-            }
-            session.comfyReady = profile.startupMode != ProfileStartupMode::CpuPreDownload;
-            session.loadedRequiredNodes = profile.requiredNodes.clone();
-            session.state = SessionLifecycle::Ready;
-            for stg in session.stages.iter_mut() {
-                stg.status = StageStatus::Completed;
-                if stg.id == "provision" {
-                    stg.detail = Some(gpu_label.to_string());
-                } else if stg.id == "readiness" {
-                    stg.detail = Some(if session.loadedRequiredNodes.is_empty() {
-                        "ComfyUI /system_stats 与 /queue 就绪".to_string()
-                    } else {
-                        format!(
-                            "已就绪 · 节点已加载: {}",
-                            session.loadedRequiredNodes.join(", ")
-                        )
-                    });
-                }
-            }
-            session.logs.push(format!("[Provision] 已分配: {gpu_label}"));
-            session.logs.push(format!(
-                "[Drive] DRIVE_MOUNT_OK True ({})",
-                profile.driveRootPath
-            ));
-            session.logs.push(
-                "[Watchdog] 云端独立看门狗已激活 (关闭桌面端依然自动防超时扣费)".to_string(),
-            );
-            session.logs.push(format!(
-                "[Tunnel] 本地端口转发已就绪 -> http://127.0.0.1:{}",
-                profile.comfyPort
-            ));
-
-            self.tunnels.write().await.push(PortTunnel {
-                id: format!("tun-{}", profile.comfyPort),
-                sessionName: session.name.clone(),
-                remotePort: profile.comfyPort,
-                localPort: profile.comfyPort,
-                label: "ComfyUI 主服务".to_string(),
-                status: TunnelStatus::Connected,
-                healthy: Some(true),
-                healthPath: Some("/system_stats".to_string()),
-                reconnectCount: 0,
-                lastError: None,
-            });
-            if let Some(mp) = profile.managementPort {
-                self.tunnels.write().await.push(PortTunnel {
-                    id: format!("tun-{mp}"),
-                    sessionName: session.name.clone(),
-                    remotePort: mp,
-                    localPort: mp,
-                    label: "DramaSmith 云端管理端".to_string(),
-                    status: TunnelStatus::Connected,
-                    healthy: Some(true),
-                    healthPath: Some("/".to_string()),
-                    reconnectCount: 0,
-                    lastError: None,
-                });
-            }
-
-            {
-                let mut st = self.store.write().await;
-                if let Some(s) = st.sessions.iter_mut().find(|x| x.name == session.name) {
-                    *s = session.clone();
-                }
-            }
-            self.persist().await;
-            return Ok(session);
-        }
-
-        // REAL COLAB MODE PIPELINE
+    async fn execute_real_launch_pipeline(
+        &self,
+        profile_id: &str,
+        session_name: &str,
+    ) -> Result<ColabSession, String> {
+        let (profile, active_acc, ds_url, auto_sync_ds) = {
+            let st = self.store.read().await;
+            let prof = st
+                .profiles
+                .iter()
+                .find(|p| p.id == profile_id)
+                .cloned()
+                .ok_or_else(|| format!("未找到工作流启动档位 '{profile_id}'"))?;
+            let acc = st.accounts.iter().find(|a| a.isActive).cloned();
+            (
+                prof,
+                acc,
+                st.settings.dramaSmithApiUrl.clone(),
+                st.settings.autoSyncDramaSmith,
+            )
+        };
+        let session_name = session_name.to_string();
         let active_account = active_acc.ok_or_else(|| {
-            "请先在「多账号与算力」或「设置」页面登录/接管一个 Google 账号（或右上角切到演示沙盒模式体验）".to_string()
+            "请先在「账号与会话」页面关联你的 Google 账号".to_string()
         })?;
         let state_file = crate::colab::accounts::account_state_file(&self.data_dir, &active_account.id);
 
@@ -963,15 +1002,36 @@ impl AppCore {
 
         // Stage 2: Mount Google Drive
         if profile.driveMountMode != DriveMountMode::Disabled {
-            let rclone_cfg = crate::colab::accounts::secret_get(&self.data_dir, "rclone_config")
-                .await
-                .ok()
-                .flatten();
-            match crate::colab::session_runner::mount_google_drive(
+            let rclone_cfg = if profile.driveMountMode == DriveMountMode::RcloneUnattended {
+                crate::colab::accounts::secret_get(&self.data_dir, "rclone_config")
+                    .await
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
+            let store_handle = &self.store;
+            let sname_for_cb = session_name.clone();
+            match crate::colab::session_runner::mount_google_drive_notifying(
                 &state_file,
                 &session_name,
                 profile.driveMountMode,
                 rclone_cfg.as_deref(),
+                |consent_url| {
+                    let u = consent_url.to_string();
+                    if let Ok(mut guard) = store_handle.try_write() {
+                        if let Some(sess) = guard.sessions.iter_mut().find(|s| s.name == sname_for_cb) {
+                            sess.driveAuthUrl = Some(u.clone());
+                            set_stage(
+                                &mut sess.stages,
+                                "mount_drive",
+                                StageStatus::Running,
+                                Some("请在弹出的浏览器中点击允许挂载 Google Drive...".to_string()),
+                            );
+                            sess.logs.push(format!("[Drive] 等待浏览器确认挂载授权: {u}"));
+                        }
+                    }
+                },
             )
             .await
             {
@@ -985,7 +1045,7 @@ impl AppCore {
                             StageStatus::Completed,
                             Some(format!("DRIVE_MOUNT_OK ({})", profile.driveRootPath)),
                         );
-                        set_stage(&mut s.stages, "restore_env", StageStatus::Running, None);
+                        set_stage(&mut s.stages, "restore_env", StageStatus::Running, Some("正在恢复环境与映射云盘模型...".to_string()));
                         s.logs.push(format!(
                             "[Drive] Google Drive 已挂载 -> {}",
                             profile.driveRootPath
@@ -1049,7 +1109,7 @@ impl AppCore {
             &session_name,
             crate::comfy::BOOTSTRAP_COMFY_PY,
             &envs,
-            900,
+            1800,
         )
         .await
         {
@@ -1069,6 +1129,8 @@ impl AppCore {
                         }
                     }
                 }
+                let all_lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
+                let tail_start = all_lines.len().saturating_sub(60);
                 self.update_session_mut(&session_name, |s| {
                     s.cloudflareUrl = cf_url;
                     set_stage(
@@ -1078,10 +1140,8 @@ impl AppCore {
                         Some("环境与模型目录映射完成".to_string()),
                     );
                     set_stage(&mut s.stages, "tunnel", StageStatus::Running, None);
-                    for line in output.lines().take(30) {
-                        if !line.trim().is_empty() {
-                            s.logs.push(line.to_string());
-                        }
+                    for line in &all_lines[tail_start..] {
+                        s.logs.push((*line).to_string());
                     }
                 })
                 .await;
@@ -1094,7 +1154,7 @@ impl AppCore {
 
         // Stage 4: Open local 127.0.0.1 SSH port-forward tunnels
         if profile.startupMode != ProfileStartupMode::CpuPreDownload {
-            let _ = self
+            if let Err(err) = self
                 .create_port_tunnel(
                     &session_name,
                     profile.comfyPort,
@@ -1102,9 +1162,13 @@ impl AppCore {
                     "ComfyUI 主服务",
                     Some("/system_stats".to_string()),
                 )
-                .await?;
+                .await
+            {
+                self.mark_stage_failed(&session_name, "tunnel", &err).await;
+                return Err(err);
+            }
             if let Some(mp) = effective_mgmt_port {
-                let _ = self
+                if self
                     .create_port_tunnel(
                         &session_name,
                         mp,
@@ -1112,7 +1176,11 @@ impl AppCore {
                         "DramaSmith 管理端",
                         Some("/".to_string()),
                     )
-                    .await;
+                    .await
+                    .is_err()
+                {
+                    effective_mgmt_port = None;
+                }
             }
         }
 
@@ -1123,7 +1191,7 @@ impl AppCore {
                 &mut s.stages,
                 "tunnel",
                 StageStatus::Completed,
-                Some(format!("127.0.0.1:{} 已连通", profile.comfyPort)),
+                Some(format!("127.0.0.1:{} 隧道守护已启动", profile.comfyPort)),
             );
             set_stage(&mut s.stages, "readiness", StageStatus::Running, None);
         })
@@ -1135,9 +1203,10 @@ impl AppCore {
         if profile.startupMode != ProfileStartupMode::CpuPreDownload {
             let base = format!("http://127.0.0.1:{}", profile.comfyPort);
             let mut stats_ok = false;
+            let mut queue_ok = false;
             for _ in 0..30 {
                 if let Ok(r) = self
-                    .http_client
+                    .local_http_client
                     .get(format!("{base}/system_stats"))
                     .timeout(std::time::Duration::from_secs(4))
                     .send()
@@ -1145,33 +1214,52 @@ impl AppCore {
                 {
                     if r.status().is_success() {
                         stats_ok = true;
-                        break;
+                        if let Ok(qr) = self
+                            .local_http_client
+                            .get(format!("{base}/queue"))
+                            .timeout(std::time::Duration::from_secs(4))
+                            .send()
+                            .await
+                        {
+                            queue_ok = qr.status().is_success();
+                        }
+                        if queue_ok {
+                            break;
+                        }
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
 
-            if stats_ok {
-                for node in &profile.requiredNodes {
-                    let ok = match self
-                        .http_client
-                        .get(format!("{base}/object_info/{node}"))
-                        .timeout(std::time::Duration::from_secs(5))
-                        .send()
+            if !stats_ok || !queue_ok {
+                let err = format!(
+                    "本地隧道 127.0.0.1:{} 未能连通云端 ComfyUI (/system_stats={}, /queue={})",
+                    profile.comfyPort, stats_ok, queue_ok
+                );
+                self.mark_stage_failed(&session_name, "readiness", &err)
+                    .await;
+                return Err(err);
+            }
+
+            for node in &profile.requiredNodes {
+                let ok = match self
+                    .local_http_client
+                    .get(format!("{base}/object_info/{node}"))
+                    .timeout(std::time::Duration::from_secs(5))
+                    .send()
+                    .await
+                {
+                    Ok(resp) => resp
+                        .json::<serde_json::Value>()
                         .await
-                    {
-                        Ok(resp) => resp
-                            .json::<serde_json::Value>()
-                            .await
-                            .map(|v| v.get(node).is_some())
-                            .unwrap_or(false),
-                        Err(_) => false,
-                    };
-                    if ok {
-                        loaded_nodes.push(node.clone());
-                    } else {
-                        missing_nodes.push(node.clone());
-                    }
+                        .map(|v| v.get(node).is_some())
+                        .unwrap_or(false),
+                    Err(_) => false,
+                };
+                if ok {
+                    loaded_nodes.push(node.clone());
+                } else {
+                    missing_nodes.push(node.clone());
                 }
             }
         }
@@ -1183,8 +1271,9 @@ impl AppCore {
                 .await
                 .clone()
                 .unwrap_or_else(|| format!("http://127.0.0.1:{}", profile.comfyPort));
-            let _ = crate::comfy::sync_dramasmith_colab_url(&self.http_client, &ds_url, &sync_target)
-                .await;
+            let _ =
+                crate::comfy::sync_dramasmith_colab_url(&self.local_http_client, &ds_url, &sync_target)
+                    .await;
         }
 
         let final_session = self
@@ -1279,7 +1368,7 @@ impl AppCore {
         .await;
 
         let mut verified = true;
-        if mode == BackendMode::Real {
+        if mode == BackendMode::Real && !sess.endpoint.trim().is_empty() {
             let state_file =
                 crate::colab::accounts::account_state_file(&self.data_dir, &sess.accountId);
             verified = crate::colab::session_runner::verified_safe_stop(
@@ -1291,8 +1380,8 @@ impl AppCore {
                 sess.driveRootPath.as_deref(),
                 sess.comfyLocalUrl.as_deref(),
                 sess.managementLocalUrl.as_deref(),
-                safe_backup && !force,
-                force,
+                safe_backup && !force && sess.driveMounted,
+                force || matches!(sess.state, SessionLifecycle::Error | SessionLifecycle::Provisioning | SessionLifecycle::Orphan),
             )
             .await?;
         }
@@ -1436,7 +1525,7 @@ impl AppCore {
 
     pub async fn sync_dramasmith_endpoint(&self, endpoint_url: &str) -> Result<String, String> {
         let ds_url = self.store.read().await.settings.dramaSmithApiUrl.clone();
-        crate::comfy::sync_dramasmith_colab_url(&self.http_client, &ds_url, endpoint_url).await
+        crate::comfy::sync_dramasmith_colab_url(&self.local_http_client, &ds_url, endpoint_url).await
     }
 
     pub async fn create_port_tunnel(

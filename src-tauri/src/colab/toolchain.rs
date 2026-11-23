@@ -14,7 +14,11 @@ pub(crate) fn command(program: impl AsRef<OsStr>) -> Command {
     cmd.creation_flags(0x08000000);
     cmd.kill_on_drop(true)
         .stdin(Stdio::null())
-        .env("PYTHONUTF8", "1");
+        .env("PYTHONUTF8", "1")
+        .env("NO_PROXY", "127.0.0.1,localhost,::1")
+        .env("no_proxy", "127.0.0.1,localhost,::1")
+        .env("COLAB_CLI_ASSIGN_RETRIES", "1")
+        .env("COLAB_CLI_REQUEST_TIMEOUT", "65");
     cmd
 }
 

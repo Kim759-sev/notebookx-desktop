@@ -60,6 +60,56 @@ fn sufficient_vram(mib: u32, minimum_gb: u32) -> bool {
     u64::from(mib) >= (u64::from(minimum_gb) * 1024).saturating_sub(1024)
 }
 
+fn sanitize_cli_error(subcmd: &str, status: std::process::ExitStatus, stdout: &[u8], stderr: &[u8]) -> String {
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(stderr).trim(),
+        String::from_utf8_lossy(stdout).trim()
+    );
+    let mut safe_lines: Vec<String> = combined
+        .lines()
+        .map(str::trim)
+        .filter(|l| {
+            !l.is_empty()
+                && !l.starts_with("[colab] Creating session")
+                && !l.to_ascii_lowercase().contains("bearer ")
+                && !l.to_ascii_lowercase().contains("refresh_token")
+        })
+        .map(str::to_owned)
+        .collect();
+    if safe_lines.len() > 6 {
+        safe_lines = safe_lines.split_off(safe_lines.len() - 6);
+    }
+    let raw_detail = safe_lines.join(" | ");
+    let lower = raw_detail.to_ascii_lowercase();
+
+    if lower.contains("allocation refused") || lower.contains("precondition failed") || lower.contains("412") {
+        return format!(
+            "Google Colab 当前区域目标显卡库存暂时紧缺或已达并发上限 (HTTP 412)。可稍后重试，或先切换 A100 / L4 档位。（原始返回: {raw_detail}）"
+        );
+    }
+    if lower.contains("backend rejected accelerator") || lower.contains("400") {
+        return format!(
+            "Google Colab 拒绝了当前显卡型号请求 (HTTP 400)，请检查账号套餐配额或尝试切换显卡型号。（原始返回: {raw_detail}）"
+        );
+    }
+    if lower.contains("readtimeout") || lower.contains("timed out") {
+        return format!(
+            "连接 Google Colab 分配接口超时（请检查本机网络/代理是否稳定放行 colab.research.google.com）。详情: {raw_detail}"
+        );
+    }
+    if lower.contains("proxyerror") || lower.contains("connectionerror") || lower.contains("ssl") {
+        return format!(
+            "连接 Google Colab 网络/代理异常，请检查本机科学上网代理状态。详情: {raw_detail}"
+        );
+    }
+    if raw_detail.is_empty() {
+        format!("Colab {subcmd} exited with {status}.")
+    } else {
+        format!("Colab {subcmd} 失败 ({status}): {raw_detail}")
+    }
+}
+
 async fn cli(
     state: &Path,
     args: &[&str],
@@ -70,7 +120,7 @@ async fn cli(
     cmd.args(args);
     let out = run(cmd, stdin, seconds).await?;
     if !out.status.success() {
-        return Err(format!("Colab {} exited with {}.", args[0], out.status));
+        return Err(sanitize_cli_error(args[0], out.status, &out.stdout, &out.stderr));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -390,8 +440,23 @@ pub async fn mount_google_drive(
     mode: DriveMountMode,
     rclone_config: Option<&str>,
 ) -> Result<MountResult, String> {
+    mount_google_drive_notifying(state, name, mode, rclone_config, |_| {}).await
+}
+
+pub async fn mount_google_drive_notifying<N>(
+    state: &Path,
+    name: &str,
+    mode: DriveMountMode,
+    rclone_config: Option<&str>,
+    mut on_url: N,
+) -> Result<MountResult, String>
+where
+    N: FnMut(&str),
+{
     let mut auth_url = None;
     mount_google_drive_with_consent(state, name, mode, rclone_config, |url| {
+        let _ = open::that(&url);
+        on_url(&url);
         auth_url = Some(url);
         async {
             let account = account_id(state)?;
