@@ -300,6 +300,11 @@ const handlers: { [K in Command]: (args: Args<K>) => Result<K> } = {
     (data.profiles = data.profiles.filter((p) => p.id !== profileId)),
   launch_profile_session: ({ profileId }) => launch(profileId),
   stop_session: ({ sessionName }) => stop(sessionName),
+  open_drive_consent: ({ sessionName }) => {
+    const url = session(sessionName).driveAuthUrl;
+    if (!url) throw Error('No Drive authorization is pending');
+    window.open(url, '_blank', 'noopener,noreferrer');
+  },
   extend_session_deadline: ({ sessionName, addMinutes }) => {
     const s = session(sessionName);
     s.autoStopAt = new Date(

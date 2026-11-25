@@ -33,6 +33,7 @@ import {
   Save,
   Square,
   Terminal,
+  TriangleAlert,
   Video,
   Workflow,
   XCircle,
@@ -236,7 +237,7 @@ function SessionTools({ s }: { s: ColabSession }) {
                   ? LoaderCircle
                   : st.status === 'failed'
                     ? XCircle
-                    : Circle;
+                    : st.status === 'warning' ? TriangleAlert : Circle;
             return (
               <div key={st.id} className={'step ' + st.status}>
                 <Icon size={19} className={st.status === 'running' ? 'spin' : ''} />
@@ -246,15 +247,20 @@ function SessionTools({ s }: { s: ColabSession }) {
             );
           })}
         </div>
-        {s.driveAuthUrl && (
-          <External url={s.driveAuthUrl}>
-            {t('Authorize Drive')} <ExternalLink size={14} />
-          </External>
+        {live && !s.driveMounted && s.driveAuthUrl && (
+          <div className="notice" role="status">
+            <span>{t('Drive is waiting for permission')} · {s.accountEmail}</span>
+            {isDesktop() ? (
+              <Button onClick={() => void run(() => api('open_drive_consent', { sessionName: s.name }))}>
+                {t('Authorize Drive')} <ExternalLink size={14} />
+              </Button>
+            ) : <External url={s.driveAuthUrl}>{t('Authorize Drive')} <ExternalLink size={14} /></External>}
+          </div>
         )}
         {s.lastError && <p className="notice bad">{s.lastError}</p>}
-        {live && (
+        {(live || (s.state === 'error' && s.endpoint && !s.verifiedUnassigned)) && (
           <div className="actions line-top">
-            <Button variant="outline"
+            {live && <Button variant="outline"
               onClick={() =>
                 void run(
                   () => api('extend_session_deadline', { sessionName: s.name, addMinutes: 120 }),
@@ -265,7 +271,7 @@ function SessionTools({ s }: { s: ColabSession }) {
             >
               <Clock3 />
               {t('Extend by 2 hours')}
-            </Button>
+            </Button>}
             <Button variant="destructive-outline"
               onClick={() => void run(() => api('stop_session', { sessionName: s.name, force: false }))}
             >
@@ -282,7 +288,7 @@ function SessionTools({ s }: { s: ColabSession }) {
         <div className="two-col">
           <Panel title="ComfyUI snapshot" icon={Save}>
             <p>{t('Snapshots preserve custom nodes and settings in Google Drive.')}</p>
-            <Button variant="outline"
+            <Button variant="outline" disabled={!s.driveMounted}
               onClick={() =>
                 void run(
                   () => api('save_comfy_environment_snapshot', { sessionName: s.name }),
@@ -444,6 +450,21 @@ export default function Studio() {
       </section>
       {s?.state === 'stopped' && s.verifiedUnassigned && <Verified />}
       {s && s.state !== 'stopped' && <SessionTools s={s} />}
+      {s?.accelerator === 'G4' && s.stages.find(st => st.id === 'provision')?.status === 'failed'
+        && /HTTP (412|502|503|504)/.test(s.lastError ?? '') && (
+        <div className="actions">
+          {data.profiles.filter(item => ['A100', 'L4'].includes(item.accelerator)).map(item => (
+            <Button variant="outline" key={item.id} onClick={() => select(item.id)}>
+              {t('Select')} {t(item.name)}
+            </Button>
+          ))}
+          <Button variant="outline" onClick={() => setEditor({
+            existing: false,
+            p: { ...newProfile('CPU · ComfyUI', 'CPU', 0), startupMode: 'comfySnapshot',
+              driveMountMode: 'disabled', managementPort: null, syncDramaSmith: false },
+          })}>{t('Create CPU test profile')}</Button>
+        </div>
+      )}
       <section>
         <div className="section-head profiles-title">
           <h2>

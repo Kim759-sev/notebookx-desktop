@@ -46,6 +46,10 @@ def inside(root, relative):
 
 
 def drive_root():
+    if os.getenv("NBX_EPHEMERAL") == "1":
+        root = CONTENT / "notebookx-session"
+        root.mkdir(parents=True, exist_ok=True)
+        return root
     root = Path(os.getenv("NBX_DRIVE_ROOT", "/content/drive/MyDrive/DramaSmith-H3")).resolve()
     # An ordinary /content/drive directory is ephemeral when the mount failed.
     mounts = Path("/proc/self/mountinfo").read_text().splitlines()
@@ -394,8 +398,7 @@ def required_nodes():
     return nodes
 
 
-def monitor(root, port, management, proc, log, started, *, degraded=False):
-    deadline = time.monotonic() + int(os.getenv("NBX_STARTUP_TIMEOUT_SECONDS", "1800"))
+def monitor(root, port, management, proc, log, started, *, deadline):
     offset = 0
     tail = ""
     tunnel = None
@@ -422,7 +425,10 @@ def monitor(root, port, management, proc, log, started, *, degraded=False):
     while time.monotonic() < deadline:
         read_tunnel()
         if proc and proc.poll() not in (None, 0):
-            raise RuntimeError(f"Startup exited with code {proc.returncode}; see {log}")
+            with log.open("rb") as stream:
+                stream.seek(max(0, log.stat().st_size - 2048))
+                tail_lines = stream.read().decode(errors="replace").strip().splitlines()
+            raise RuntimeError(f"启动进程退出 ({proc.returncode})。{' · '.join(tail_lines[-3:])}")
         try:
             if (not management or listening(management)) and isinstance(json_api(port, "/system_stats"), dict):
                 queue = json_api(port, "/queue")
@@ -443,16 +449,14 @@ def monitor(root, port, management, proc, log, started, *, degraded=False):
                 raise
             data = {}
         (loaded if node in data else missing).append(node)
-    if missing and not degraded:
-        stage("nodes", "failed", ", ".join(missing), loadedRequiredNodes=loaded, missingRequiredNodes=missing)
-        raise RuntimeError("Missing required nodes: " + ", ".join(missing))
-    stage("nodes", "skipped" if missing else "completed", ", ".join(missing or loaded),
+    stage("nodes", "warning" if missing else "completed", ", ".join(missing or loaded),
           loadedRequiredNodes=loaded, missingRequiredNodes=missing)
     stage("ready", "completed", f"ComfyUI ready on {port}", comfyPort=port, managementPort=management or None,
           cloudflareUrl=tunnel, loadedRequiredNodes=loaded, missingRequiredNodes=missing)
 
 
 def start(root, mode):
+    deadline = time.monotonic() + int(os.getenv("NBX_STARTUP_TIMEOUT_SECONDS", "1800"))
     port = int(os.getenv("NBX_COMFY_PORT") or 8188)
     management = int(os.getenv("NBX_MGMT_PORT", "8189" if mode == "managedScript" else "0") or 0)
     script = inside(root, os.getenv("NBX_MANAGED_SCRIPT") or "workflows/startup-managed-v2.py")
@@ -461,8 +465,11 @@ def start(root, mode):
     if managed and not all((root / name).is_dir() for name in ("models", "workflows")):
         raise RuntimeError("Managed Drive is missing its models or workflows directory")
     layout(root)
-    print("DRIVE_MOUNT_OK True", flush=True)
-    stage("drive", "completed", str(root))
+    if os.getenv("NBX_EPHEMERAL") == "1":
+        stage("drive", "skipped", f"使用实例临时目录 {root}，停止后文件会被释放")
+    else:
+        print("DRIVE_MOUNT_OK True", flush=True)
+        stage("drive", "completed", str(root))
     if mode == "cpuPreDownload":
         downloads(root)
         stage("ready", "completed", "CPU download queue finished")
@@ -470,7 +477,7 @@ def start(root, mode):
     if mode not in ("managedScript", "comfySnapshot"):
         raise ValueError("Unknown NBX_STARTUP_MODE")
     if fallback:
-        stage("managedScript", "skipped", "Managed script absent; starting a standard ComfyUI snapshot")
+        stage("managedScript", "skipped", f"未找到 {script.name}，正在启动标准 ComfyUI。")
     if not managed:
         management = 0
     log = CONTENT / ("nbx-managed.log" if managed else "nbx-comfy.log")
@@ -494,12 +501,14 @@ def start(root, mode):
             configure(root)
             stage("snapshot", "completed", "Local environment and Drive paths ready")
             command, cwd = [sys.executable, "-u", "main.py", "--listen", "127.0.0.1", "--port", str(port)], COMFY
+            if os.getenv("NBX_ACCELERATOR") == "CPU":
+                command.append("--cpu")
         stage("launch", "running", str(log))
         with log.open("wb") as stream:
             proc = subprocess.Popen(command, cwd=cwd, stdout=stream, stderr=subprocess.STDOUT,
                                     stdin=subprocess.DEVNULL, start_new_session=True)
     manifest(root)
-    monitor(root, port, management, proc, log, started, degraded=fallback)
+    monitor(root, port, management, proc, log, started, deadline=deadline)
 
 
 def main():
@@ -524,4 +533,4 @@ if __name__ == "__main__":
         main()
     except Exception as exc:
         stage("bootstrap", "failed", str(exc))
-        sys.exit(1)
+        raise

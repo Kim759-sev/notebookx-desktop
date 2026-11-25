@@ -57,6 +57,24 @@ with h['locked']():
     h['set_slots']('new-fixture', None)
     h['dispatch']('rollback-add', [])
     assert h['active']() == raw
+from contextlib import contextmanager
+import io
+locks = []
+file_lock = h['locked']
+@contextmanager
+def tracked_lock():
+    assert not locks
+    with file_lock():
+        locks.append(True)
+        try:
+            yield
+        finally:
+            locks.pop()
+def contact_google(req, **kwargs):
+    assert not locks, 'network request holds the vault lock'
+    return io.BytesIO(b'{"assignments":[]}')
+g.update(locked=tracked_lock, urlopen=contact_google)
+assert h['dispatch']('assignments', ['active']) == []
 g['request'] = lambda *_args, **_kwargs: {'currentBalance': 300, 'consumptionRateHourly': 2, 'assignmentsCount': 1}
 assert h['dispatch']('usage', ['fixture'])['planTier'] == 'PRO+'
 g['request'] = lambda *_args, **_kwargs: {'assignments': [{'endpoint':'vm', 'accelerator':'T4', 'machineShape':0, 'variant':1, 'runtimeProxyInfo':{'token':'fixture'}}]}

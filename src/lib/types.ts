@@ -74,7 +74,7 @@ export interface WorkflowProfile {
   defaultWorkflowJsonPath: string | null;
 }
 
-export type StageStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+export type StageStatus = 'pending' | 'running' | 'completed' | 'warning' | 'failed' | 'skipped';
 
 export interface StartupStage {
   id: string;

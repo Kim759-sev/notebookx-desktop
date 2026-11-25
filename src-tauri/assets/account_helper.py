@@ -1,6 +1,6 @@
 """NotebookX credential bridge. Only the marker line is part of its protocol."""
 import base64
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from contextlib import contextmanager, nullcontext, redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -231,14 +231,23 @@ def _is_expired(info):
 
 
 def access(account, force=False):
-    info = credential(account)
+    with locked():
+        info = credential(account)
     if info.get("refresh_token") and (force or not info.get("token") or _is_expired(info)):
-        info = _stdlib_refresh(info)
-        raw = json.dumps(info)
-        if account == "active":
-            set_slots(raw, None)
-        else:
-            put("account:" + account, raw)
+        refreshed = _stdlib_refresh(info)
+        with locked():
+            current = credential(account)
+            if current == info:
+                raw = json.dumps(refreshed)
+                if account == "active":
+                    set_slots(raw, None)
+                else:
+                    put("account:" + account, raw)
+                info = refreshed
+            elif current.get("refresh_token") == info["refresh_token"]:
+                info = current
+            else:
+                raise Failure("账号凭证已更改，请重新执行此操作。")
     if not info.get("token"):
         raise Failure("The credential needs a new sign-in.")
     return info
@@ -274,7 +283,8 @@ def request(account, path, xsrf=None, params=None, data=None, content_type=None)
         query = urlencode({"authuser": "0", **(params or {})})
         req = Request(TUN + path + "?" + query, headers=headers,
                       data=data if data is not None else b"" if xsrf is not None else None)
-        req.add_unredirected_header("Authorization", "Bearer " + access(account, retry)["token"])
+        token = access(account, retry)["token"]
+        req.add_unredirected_header("Authorization", "Bearer " + token)
         if xsrf is not None:
             req.add_unredirected_header("X-Goog-Colab-Token", xsrf)
         try:
@@ -387,9 +397,10 @@ def exchange_pkce_code(raw_code, verifier):
 
 def dispatch(op, args):
     if op == "status":
-        if not active():
-            return {"active": False, "email": None}
-        return {"active": True, "email": email(access("active"))}
+        with locked():
+            present = bool(active())
+        info = access("active") if present else None
+        return {"active": bool(info), "email": email(info) if info else None}
     if op == "begin-add":
         begin_add(clear=True)
     elif op == "begin-login":
@@ -405,28 +416,40 @@ def dispatch(op, args):
     elif op == "rollback-add":
         rollback()
     elif op in ("adopt", "finish-add", "complete-login"):
-        if op != "adopt" and get("add-backup") is None:
-            raise Failure("登录会话已重置，请重新点击「打开 Google 授权页」。")
-        if op == "complete-login":
-            flow_raw = get("add-flow")
-            if not flow_raw:
+        with locked():
+            backup = get("add-backup")
+            flow = get("add-flow")
+            if op != "adopt" and backup is None:
+                raise Failure("登录会话已重置，请重新点击「打开 Google 授权页」。")
+            if op == "complete-login" and not flow:
                 raise Failure("请先点击打开 Google 授权页面。")
-            cred_json = exchange_pkce_code(sys.stdin.read(), json.loads(flow_raw)["verifier"])
-            set_slots(cred_json, None)
-        info = access("active")
-        addr = email(info)
-        if not addr:
-            raise Failure("Google did not identify the signed-in account.")
-        put("account:" + args[0], json.dumps(info))
-        if op != "adopt":
-            previous = json.loads(get("add-backup"))
-            if previous["ring"] is not None or previous["file"] is not None:
-                # The previous CLI login may belong to someone the desktop has
-                # never adopted. The new account already has its own saved slot.
-                set_slots(**previous)
-            put("add-flow", None)
-            put("add-backup", None)
-        return {"email": addr}
+        try:
+            if op == "complete-login":
+                info = json.loads(exchange_pkce_code(sys.stdin.read(), json.loads(flow)["verifier"]))
+            else:
+                info = access("active")
+            addr = email(info)
+            if not addr:
+                raise Failure("Google did not identify the signed-in account.")
+            with locked():
+                if op != "adopt" and (get("add-backup") != backup or get("add-flow") != flow):
+                    raise Failure("登录会话已更改，请重新登录。")
+                raw = json.dumps(info)
+                put("account:" + args[0], raw)
+                if op != "adopt":
+                    previous = json.loads(backup)
+                    if previous["ring"] is not None or previous["file"] is not None:
+                        set_slots(**previous)
+                    elif op == "complete-login":
+                        set_slots(raw, None)
+                    put("add-flow", None)
+                    put("add-backup", None)
+            return {"email": addr}
+        except Exception:
+            with locked():
+                if op != "adopt" and get("add-backup") == backup and get("add-flow") == flow:
+                    rollback()
+            raise
     elif op == "use":
         if get("add-backup") is not None:
             raise Failure("Finish or roll back the pending sign-in first.")
@@ -456,8 +479,7 @@ def dispatch(op, args):
         params = dict(authtype="dfs_ephemeral", version="2", dryrun="true",
                       propagate="true", record="false")
         token = request(account, path, params=params)["token"]
-        body = (b'--nbx\r\nContent-Disposition: form-data; name="file_id"; '
-                b'filename="file_id"\r\n\r\nempty.ipynb\r\n--nbx--\r\n')
+        body = b'--nbx\r\nContent-Disposition: form-data; name="file_id"\r\n\r\nempty.ipynb\r\n--nbx--\r\n'
         reply = request(account, path, xsrf=token, params=params, data=body,
                         content_type="multipart/form-data; boundary=nbx")
         return {"ready": reply.get("success") is True}
@@ -504,10 +526,36 @@ def run_scoped_cli(account, argv):
     from google.oauth2.credentials import Credentials
 
     def scoped_credentials(_config):
-        with locked():
-            return Credentials.from_authorized_user_info(access(account))
+        return Credentials.from_authorized_user_info(access(account))
 
     auth._get_google_auth_credentials = scoped_credentials
+    if op == "drivemount":
+        # The desktop displays and opens the validated consent URL.
+        from colab_cli.commands import automation
+        automation.open_url_in_browser = lambda _url: False
+    if op == "new":
+        # A lost POST response can still have allocated the VM. Only a GET for
+        # the very same notebook hash proves it belongs to this launch.
+        import requests
+        from colab_cli.client import Assignment, Client, ColabRequestError
+        assign = Client.assign
+
+        def reconciled_assign(client, notebook_hash, **options):
+            try:
+                return assign(client, notebook_hash, **options)
+            except (ColabRequestError, requests.RequestException) as exc:
+                try:
+                    found = client._get_assignment(notebook_hash, **options)
+                except Exception:
+                    found = None
+                if isinstance(found, Assignment):
+                    return found
+                if isinstance(exc, ColabRequestError):
+                    # Rich can render request locals and wrap the URL across lines.
+                    print(f"Colab assign HTTP {exc.response.status_code}", file=sys.stderr)
+                    raise SystemExit(1) from None
+                raise
+        Client.assign = reconciled_assign
     if op == "drivemount" and os.name == "posix":
         # Force the CLI's documented stdin fallback when launched from a terminal.
         if os.getsid(0) != os.getpid():
@@ -555,13 +603,11 @@ if __name__ == "__main__":
         logging.disable(logging.CRITICAL)
         failed = False
         try:
-            with open(os.devnull, "w") as quiet, redirect_stdout(quiet), redirect_stderr(quiet), locked():
-                try:
-                    result = dispatch(sys.argv[1], sys.argv[2:])
-                except Exception:
-                    if sys.argv[1:2] in (["complete-login"], ["finish-add"]):
-                        rollback()
-                    raise
+            network_ops = {"status", "usage", "assignments", "drive-consent-ready", "unassign",
+                           "adopt", "finish-add", "complete-login"}
+            guard = nullcontext() if sys.argv[1] in network_ops else locked()
+            with open(os.devnull, "w") as quiet, redirect_stdout(quiet), redirect_stderr(quiet), guard:
+                result = dispatch(sys.argv[1], sys.argv[2:])
         except Exception as exc:
             failed = True
             message = str(exc) if isinstance(exc, Failure) else type(exc).__name__

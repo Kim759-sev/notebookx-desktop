@@ -35,7 +35,7 @@ export function newProfile(
     description: '',
     icon: 'workflow',
     accelerator,
-    highMem: accelerator !== 'CPU',
+    highMem: accelerator !== 'CPU' && accelerator !== 'G4',
     minVramGb,
     maxRetries: 3,
     driveMountMode: 'colabNative',

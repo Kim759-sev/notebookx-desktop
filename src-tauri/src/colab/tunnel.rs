@@ -5,7 +5,8 @@ use super::{
 use crate::types::{PortTunnel, TunnelStatus};
 use std::{path::Path, process::Stdio, time::Duration};
 use tokio::{
-    net::TcpStream,
+    io::{AsyncBufReadExt, BufReader},
+    net::{TcpListener, TcpStream},
     sync::{oneshot, watch, Mutex},
     task::JoinHandle,
     time::{sleep, timeout},
@@ -125,6 +126,11 @@ pub async fn start_tunnel(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let args = ssh_args(&proxy, &key, local_port, remote_port, cfg!(windows))?;
+    drop(
+        TcpListener::bind(("127.0.0.1", local_port))
+            .await
+            .map_err(|e| format!("本地端口 {local_port} 无法监听。{e}"))?,
+    );
     let url = health_path.map(|p| format!("http://127.0.0.1:{local_port}{p}"));
     let http = reqwest::Client::builder()
         .no_proxy()
@@ -149,6 +155,7 @@ pub async fn start_tunnel(
     let session = session.to_owned();
     let task = tokio::spawn(async move {
         let mut delay = 1;
+        let mut established = false;
         'supervise: loop {
             if matches!(session_endpoint(&state, &session).await, Ok(record) if record.as_ref() != Some(&endpoint))
             {
@@ -158,35 +165,63 @@ pub async fn start_tunnel(
                 .args(&args)
                 .env("NBX_TUNNEL_ENDPOINT", &endpoint)
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stderr(Stdio::piped())
                 .spawn();
-            if let Ok(mut child) = child {
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = &mut stop => { let _ = child.kill().await; break 'supervise; }
-                        _ = child.wait() => break,
-                        _ = sleep(Duration::from_secs(2)) => {
-                            let bound = matches!(timeout(Duration::from_secs(1), TcpStream::connect(("127.0.0.1", local_port))).await, Ok(Ok(_)));
-                            let healthy = match &url {
-                                Some(url) if bound => Some(http.get(url).send().await.is_ok_and(|r| r.status().is_success())),
-                                Some(_) => Some(false),
-                                None => None,
-                            };
-                            if bound { delay = 1; }
-                            tx.send_modify(|s| {
-                                s.healthy = healthy;
-                                if bound { s.status = TunnelStatus::Connected; s.lastError = None; }
-                            });
+            let reason = match child {
+                Ok(mut child) => {
+                    let stderr = child.stderr.take().unwrap();
+                    let capture = tokio::spawn(async move {
+                        let mut lines = BufReader::new(stderr).lines();
+                        let mut tail = std::collections::VecDeque::new();
+                        while let Ok(Some(line)) = lines.next_line().await {
+                            let safe = super::session_runner::diagnostic(&line);
+                            if !safe.is_empty() {
+                                if tail.len() == 3 {
+                                    tail.pop_front();
+                                }
+                                tail.push_back(safe);
+                            }
+                        }
+                        tail.into_iter().collect::<Vec<_>>().join(" · ")
+                    });
+                    loop {
+                        tokio::select! {
+                            biased;
+                            _ = &mut stop => { let _ = child.kill().await; capture.abort(); break 'supervise; }
+                            status = child.wait() => {
+                                let detail = timeout(Duration::from_secs(1), capture).await.ok().and_then(Result::ok).unwrap_or_default();
+                                break format!("SSH 退出（{}）。{detail}", status.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string()));
+                            },
+                            _ = sleep(Duration::from_millis(if established { 2000 } else { 250 })) => {
+                                let bound = matches!(timeout(Duration::from_secs(1), TcpStream::connect(("127.0.0.1", local_port))).await, Ok(Ok(_)));
+                                let healthy = match &url {
+                                    Some(url) if bound => Some(http.get(url).send().await.is_ok_and(|r| r.status().is_success())),
+                                    Some(_) => Some(false),
+                                    None => None,
+                                };
+                                if bound && matches!(child.try_wait(), Ok(None)) { delay = 1; established = true; } else { continue; }
+                                tx.send_modify(|s| {
+                                    s.healthy = healthy;
+                                    if bound { s.status = TunnelStatus::Connected; s.lastError = None; }
+                                });
+                            }
                         }
                     }
                 }
+                Err(e) => format!("无法启动 SSH。{e}"),
+            };
+            if !established {
+                tx.send_modify(|s| {
+                    s.status = TunnelStatus::Failed;
+                    s.lastError = Some(reason);
+                });
+                return;
             }
             tx.send_modify(|s| {
                 s.status = TunnelStatus::Reconnecting;
                 s.healthy = Some(false);
                 s.reconnectCount = s.reconnectCount.saturating_add(1);
-                s.lastError = Some(format!("SSH exited. Reconnecting in {delay}s."));
+                s.lastError = Some(format!("{reason} {delay} 秒后重新连接。"));
             });
             tokio::select! {
                 _ = &mut stop => break,
@@ -199,11 +234,31 @@ pub async fn start_tunnel(
             s.healthy = Some(false);
         });
     });
-    Ok(TunnelHandle {
+    let mut initial = rx.clone();
+    let handle = TunnelHandle {
         state: rx,
         cancel: std::sync::Mutex::new(Some(cancel)),
         task: Mutex::new(Some(task)),
+    };
+    let ready = timeout(Duration::from_secs(45), async {
+        loop {
+            let s = initial.borrow_and_update().clone();
+            match s.status {
+                TunnelStatus::Connected => return Ok(()),
+                TunnelStatus::Failed | TunnelStatus::Stopped => {
+                    return Err(s.lastError.unwrap_or_else(|| "SSH 连接已终止。".into()))
+                }
+                _ => initial.changed().await.map_err(|_| "SSH 连接已终止。")?,
+            }
+        }
     })
+    .await
+    .unwrap_or_else(|_| Err(format!("SSH 未在 45 秒内开始监听 127.0.0.1:{local_port}。")));
+    if let Err(e) = ready {
+        handle.stop().await;
+        return Err(e);
+    }
+    Ok(handle)
 }
 
 pub async fn spawn_supervised_tunnel(

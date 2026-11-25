@@ -127,6 +127,14 @@ async fn stop_session(
 }
 
 #[tauri::command]
+async fn open_drive_consent(
+    core: State<'_, Arc<AppCore>>,
+    session_name: String,
+) -> Result<(), String> {
+    core.open_drive_consent(&session_name).await
+}
+
+#[tauri::command]
 async fn extend_session_deadline(
     core: State<'_, Arc<AppCore>>,
     session_name: String,
@@ -426,6 +434,7 @@ pub fn run() {
             launch_profile_session,
             stop_session,
             extend_session_deadline,
+            open_drive_consent,
             save_comfy_environment_snapshot,
             open_comfy_desktop_window,
             sync_dramasmith_endpoint,

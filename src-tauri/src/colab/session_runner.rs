@@ -60,53 +60,94 @@ fn sufficient_vram(mib: u32, minimum_gb: u32) -> bool {
     u64::from(mib) >= (u64::from(minimum_gb) * 1024).saturating_sub(1024)
 }
 
-fn sanitize_cli_error(subcmd: &str, status: std::process::ExitStatus, stdout: &[u8], stderr: &[u8]) -> String {
-    let combined = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(stderr).trim(),
-        String::from_utf8_lossy(stdout).trim()
-    );
-    let mut safe_lines: Vec<String> = combined
+pub(super) fn diagnostic(text: &str) -> String {
+    static ANSI: OnceLock<regex::Regex> = OnceLock::new();
+    let clean = ANSI
+        .get_or_init(|| regex::Regex::new(r"\x1b\[[0-?]*[ -/]*[@-~]").unwrap())
+        .replace_all(text, "");
+    let mut lines: Vec<_> = clean
         .lines()
         .map(str::trim)
-        .filter(|l| {
-            !l.is_empty()
-                && !l.starts_with("[colab] Creating session")
-                && !l.to_ascii_lowercase().contains("bearer ")
-                && !l.to_ascii_lowercase().contains("refresh_token")
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            !line.is_empty()
+                && !line.chars().any(|c| ('\u{2500}'..='\u{257f}').contains(&c))
+                && !["File ", "Traceback ", "[colab] Creating session", "----"]
+                    .iter()
+                    .any(|p| line.starts_with(p))
+                && ![
+                    "bearer ",
+                    "token",
+                    "authorization",
+                    "://",
+                    "password",
+                    "secret",
+                    "api_key",
+                    "exec(compile(",
+                ]
+                .iter()
+                .any(|word| lower.contains(word))
         })
-        .map(str::to_owned)
+        .rev()
+        .take(3)
         .collect();
-    if safe_lines.len() > 6 {
-        safe_lines = safe_lines.split_off(safe_lines.len() - 6);
-    }
-    let raw_detail = safe_lines.join(" | ");
-    let lower = raw_detail.to_ascii_lowercase();
+    lines.reverse();
+    lines.join(" · ").chars().take(650).collect()
+}
 
-    if lower.contains("allocation refused") || lower.contains("precondition failed") || lower.contains("412") {
-        return format!(
-            "Google Colab 当前区域目标显卡库存暂时紧缺或已达并发上限 (HTTP 412)。可稍后重试，或先切换 A100 / L4 档位。（原始返回: {raw_detail}）"
-        );
-    }
-    if lower.contains("backend rejected accelerator") || lower.contains("400") {
-        return format!(
-            "Google Colab 拒绝了当前显卡型号请求 (HTTP 400)，请检查账号套餐配额或尝试切换显卡型号。（原始返回: {raw_detail}）"
-        );
+fn sanitize_cli_error(args: &[&str], stdout: &[u8], stderr: &[u8]) -> String {
+    let raw = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
+    );
+    let lower = raw.lines()
+        .filter(|line| !line.chars().any(|c| ('\u{2500}'..='\u{257f}').contains(&c)))
+        .collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    if args[0] == "new" {
+        let target = args
+            .windows(2)
+            .find(|v| matches!(v[0], "--gpu" | "--tpu"))
+            .map_or("CPU", |v| v[1]);
+        let target = if target == "G4" {
+            "G4 Blackwell 96 GB"
+        } else {
+            target
+        };
+        for (code, phrase) in [
+            (502, "bad gateway"),
+            (503, "service unavailable"),
+            (504, "gateway timeout"),
+            (412, "precondition failed"),
+        ] {
+            if lower.contains(phrase)
+                || lower.contains(&format!("http {code}"))
+                || (code == 412 && lower.contains("allocation refused"))
+            {
+                let reason = match code {
+                    412 => "可能已达并发或容量限制",
+                    504 => "分配网关超时",
+                    _ => "分配服务暂不可用，当前区域可能容量紧张",
+                };
+                return format!("Google Colab 暂未分配 {target}（HTTP {code}，{reason}）。请稍后重试，或选择满足工作流显存要求的 A100 / L4 档位。");
+            }
+        }
+        if lower.contains("backend rejected accelerator") || lower.contains("http 400") {
+            if args.contains(&"G4") && args.contains(&"--high-mem") {
+                return "Google Colab 拒绝分配 G4 高内存实例（HTTP 400）。请关闭 High-RAM 后重试。"
+                    .into();
+            }
+            return format!("Google Colab 拒绝分配 {target}（HTTP 400）。请检查套餐支持的机型。");
+        }
     }
     if lower.contains("readtimeout") || lower.contains("timed out") {
-        return format!(
-            "连接 Google Colab 分配接口超时（请检查本机网络/代理是否稳定放行 colab.research.google.com）。详情: {raw_detail}"
-        );
+        return format!("Colab {} 请求超时。请检查网络和代理后重试。", args[0]);
     }
-    if lower.contains("proxyerror") || lower.contains("connectionerror") || lower.contains("ssl") {
-        return format!(
-            "连接 Google Colab 网络/代理异常，请检查本机科学上网代理状态。详情: {raw_detail}"
-        );
-    }
-    if raw_detail.is_empty() {
-        format!("Colab {subcmd} exited with {status}.")
+    let detail = diagnostic(&raw);
+    if detail.is_empty() {
+        format!("Colab {} 执行失败。", args[0])
     } else {
-        format!("Colab {subcmd} 失败 ({status}): {raw_detail}")
+        format!("Colab {} 执行失败。{detail}", args[0])
     }
 }
 
@@ -120,7 +161,7 @@ async fn cli(
     cmd.args(args);
     let out = run(cmd, stdin, seconds).await?;
     if !out.status.success() {
-        return Err(sanitize_cli_error(args[0], out.status, &out.stdout, &out.stderr));
+        return Err(sanitize_cli_error(args, &out.stdout, &out.stderr));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -159,7 +200,7 @@ import tempfile
 _nbx_root = Path('/root/.notebookx')
 _nbx_root.mkdir(mode=0o700, exist_ok=True)
 with tempfile.NamedTemporaryFile(mode='w', dir=_nbx_root, delete=False) as _f:
-    json.dump({k: os.environ[k] for k in ('NBX_COMFY_PORT','NBX_MGMT_PORT','NBX_DRIVE_ROOT') if k in os.environ}, _f)
+    json.dump({k: os.environ[k] for k in ('NBX_COMFY_PORT','NBX_MGMT_PORT','NBX_DRIVE_ROOT','NBX_EPHEMERAL') if k in os.environ}, _f)
 os.replace(_f.name, _nbx_root/'runtime-settings.json')
 "#);
         }
@@ -186,23 +227,41 @@ def _nbx_activity():
     finally:
         stopped.set()
         worker.join()
-with _nbx_activity():
-    exec(compile({}, '<notebookx>', 'exec'), globals())
-print('\n{mark}', flush=True)
+try:
+    with _nbx_activity():
+        exec(compile({}, '<notebookx>', 'exec'), globals())
+except BaseException as exc:
+    print('\n{mark}_ERROR', type(exc).__name__, str(exc), flush=True)
+else:
+    print('\n{mark}', flush=True)
 "#,
         literal(code)
     );
-    let output = cli(
-        state,
-        &["exec", "-s", name, "--timeout", &seconds.to_string()],
-        Some(&input),
-        seconds.saturating_add(60),
-    )
-    .await?;
-    let (before, _) = output
-        .rsplit_once(&mark)
-        .ok_or("Remote Python did not finish successfully.")?;
-    Ok(before.trim_end().to_owned())
+    let mut cmd = scoped_cli(state).await?;
+    cmd.args(["exec", "-s", name, "--timeout", &seconds.to_string()]);
+    let result = run(cmd, Some(&input), seconds.saturating_add(60)).await?;
+    let output = String::from_utf8_lossy(&result.stdout);
+    if result.status.success() {
+        if let Some((before, last)) = output.rsplit_once(&format!("\n{mark}")) {
+            if last.trim().is_empty() {
+                return Ok(before.trim_end().to_owned());
+            }
+            if let Some(err) = last.strip_prefix("_ERROR ") {
+                let stderr = diagnostic(&String::from_utf8_lossy(&result.stderr));
+                let detail = [diagnostic(err), stderr]
+                    .into_iter()
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                return Err(format!("远程 Python 执行失败。{detail}"));
+            }
+        }
+    }
+    Err(sanitize_cli_error(
+        &["exec"],
+        &result.stdout,
+        &result.stderr,
+    ))
 }
 
 fn parse_gpu(text: &str) -> Result<(String, u32, u32), String> {
@@ -280,22 +339,41 @@ pub async fn provision_with_vram_guard(
 ) -> Result<ProvisionedSession, String> {
     let _guard = session_lock(state, name).await;
     let args = new_args(name, accelerator, high_mem);
+    let account = account_id(state)?;
     let mut logs = Vec::new();
     for attempt in 0..=max_retries {
         if session_endpoint(state, name).await?.is_some() {
             return Err("Session name already exists.".into());
         }
+        let before = account_helper(&["assignments", account], None).await.ok();
         let created = cli(state, &args, None, 300).await;
-        let endpoint = session_endpoint(state, name).await?.ok_or_else(|| {
-            format!(
-                "{} No endpoint was recorded. Check this account's assignments before retrying.",
-                created
-                    .as_ref()
+        let record = session_endpoint(state, name).await;
+        let endpoint = match record {
+            Ok(Some(endpoint)) => endpoint,
+            _ => {
+                let reason = created
                     .err()
-                    .map(String::as_str)
-                    .unwrap_or("Allocation status unknown.")
-            )
-        })?;
+                    .or_else(|| record.err())
+                    .unwrap_or_else(|| "Colab 未返回本次实例的标识。".into());
+                let inventory = match account_helper(&["assignments", account], None).await {
+                    Ok(rows) if rows.as_array().is_some_and(Vec::is_empty) => {
+                        "Google 当前报告此账号有 0 个活动实例。".into()
+                    }
+                    Ok(rows) => {
+                        let rows = rows.as_array().ok_or("Google 返回的实例清单无效。")?;
+                        match before.as_ref().and_then(|v| v.as_array()) {
+                            Some(prior) if rows.iter().all(|r| prior.iter().any(|p| p["endpoint"] == r["endpoint"])) =>
+                                format!("已核对 Google 清单，现有 {} 个实例，本次未发现新增实例。", rows.len()),
+                            _ => format!("Google 报告 {} 个活动实例。请在「账号与会话」刷新并核对归属后释放。", rows.len()),
+                        }
+                    }
+                    Err(e) => format!(
+                        "暂时无法向 Google 核实实例清单（{e}），请在「账号与会话」刷新后再重试。"
+                    ),
+                };
+                return Err(format!("{reason} {inventory}"));
+            }
+        };
         if let Err(e) = created {
             release(state, name, &endpoint).await?;
             return Err(e);
@@ -354,8 +432,9 @@ where
     let mut stdout = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut stderr = BufReader::new(child.stderr.take().unwrap()).lines();
     let mut stdin = child.stdin.take().unwrap();
-    timeout(Duration::from_secs(630), async {
+    timeout(Duration::from_secs(300), async {
         let (mut out_open, mut err_open) = (true, true);
+        let mut last_error = String::new();
         while out_open || err_open {
             let line = tokio::select! {
                 line = stdout.next_line(), if out_open => { let v = line.map_err(|e| e.to_string())?; out_open = v.is_some(); v },
@@ -368,10 +447,13 @@ where
                     consent(url.to_string()).await?;
                     stdin.write_all(b"\n").await.map_err(|e| e.to_string())?;
                 }
+            } else if let Some(line) = line {
+                let detail = diagnostic(&line);
+                if !detail.is_empty() { last_error = detail; }
             }
         }
-        if child.wait().await.map_err(|e| e.to_string())?.success() { Ok(()) } else { Err("Colab could not mount Drive.".into()) }
-    }).await.map_err(|_| "Timed out waiting for Drive authorization.")?
+        if child.wait().await.map_err(|e| e.to_string())?.success() { Ok(()) } else { Err(format!("Google Drive 挂载失败。{last_error}")) }
+    }).await.map_err(|_| "Google Drive 挂载或授权已超时（5 分钟）。请核对浏览器当前账号后重试。")?
 }
 
 const RCLONE_MOUNT: &str = r#"
@@ -424,7 +506,7 @@ where
     exec_snippet(
         state,
         name,
-        "import os\nassert os.path.isdir('/content/drive/MyDrive'), 'Drive mount is missing'",
+        "import os\nassert os.path.isdir('/content/drive/MyDrive') and any(map(os.path.ismount, ['/content/drive','/content/drive/MyDrive'])), 'Google Drive 未挂载'",
     )
     .await?;
     Ok(())
@@ -440,10 +522,10 @@ pub async fn mount_google_drive(
     mode: DriveMountMode,
     rclone_config: Option<&str>,
 ) -> Result<MountResult, String> {
-    mount_google_drive_notifying(state, name, mode, rclone_config, |_| {}).await
+    mount_google_drive_notifying(state, name, mode, rclone_config, |_| async {}).await
 }
 
-pub async fn mount_google_drive_notifying<N>(
+pub async fn mount_google_drive_notifying<N, F>(
     state: &Path,
     name: &str,
     mode: DriveMountMode,
@@ -451,14 +533,16 @@ pub async fn mount_google_drive_notifying<N>(
     mut on_url: N,
 ) -> Result<MountResult, String>
 where
-    N: FnMut(&str),
+    N: FnMut(String) -> F,
+    F: Future<Output = ()>,
 {
     let mut auth_url = None;
     mount_google_drive_with_consent(state, name, mode, rclone_config, |url| {
-        let _ = open::that(&url);
-        on_url(&url);
-        auth_url = Some(url);
-        async {
+        let notify = on_url(url.clone());
+        auth_url = Some(url.clone());
+        async move {
+            notify.await;
+            let _ = open::that_detached(&url);
             let account = account_id(state)?;
             let endpoint = session_endpoint(state, name)
                 .await?
@@ -601,7 +685,7 @@ const DRIVE_BACKUP: &str = r#"
 from pathlib import Path
 import os, subprocess
 src = Path('/content/ComfyUI/output')
-if src.is_dir() and any(src.iterdir()):
+if os.environ.get('NBX_EPHEMERAL') != '1' and src.is_dir() and any(src.iterdir()):
     drive = Path('/content/drive/MyDrive')
     assert drive.is_dir() and (os.path.ismount(drive) or os.path.ismount(drive.parent)), 'Drive is unavailable'
     dest = Path(os.environ.get('NBX_DRIVE_ROOT', drive / 'NotebookX')) / 'outputs'
@@ -747,6 +831,54 @@ pub async fn verified_safe_stop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requests the default G4 shape on NBX_LIVE_ACCOUNT and immediately releases it"]
+    async fn live_g4_allocation_or_verified_refusal() -> Result<(), String> {
+        let id = std::env::var("NBX_LIVE_ACCOUNT").map_err(|_| "Set NBX_LIVE_ACCOUNT")?;
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::colab::account_state_path(root.path(), &id)?;
+        let name = format!("nbx-check-{}", Uuid::new_v4().simple());
+        if account_helper(&["assignments", &id], None).await? != serde_json::json!([]) {
+            return Err("Live test requires an idle account".into());
+        }
+        let result = provision_with_vram_guard(&state, &name, AcceleratorKind::G4, false, 90, 0).await;
+        if let Some(endpoint) = session_endpoint(&state, &name).await? {
+            release(&state, &name, &endpoint).await?;
+        }
+        assert_eq!(account_helper(&["assignments", &id], None).await?, serde_json::json!([]));
+        assert_eq!(account_helper(&["usage", &id], None).await?["assignmentsCount"], 0);
+        match result {
+            Ok(vm) => eprintln!("G4 allocated and released: {:?}", vm.gpu_name),
+            Err(reason) => {
+                eprintln!("{reason}");
+                assert!(reason.contains("G4") && reason.contains("HTTP") && reason.contains("0 个活动实例"));
+                assert!(!reason.contains("│") && !reason.contains("nbh="));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn allocation_errors_keep_the_gpu_and_drop_the_traceback() {
+        let raw = "│ 240 │ request=response.request, │\n╰─────╯\nColabRequestError: Failed to issue request POST\nhttps://colab.research.google.com/tun/m/assign?nbh=private&accelerator=G4: Service Unavailable";
+        for (phrase, code) in [
+            ("Service Unavailable", 503),
+            ("Bad Gateway", 502),
+            ("Gateway Timeout", 504),
+            ("Precondition Failed", 412),
+        ] {
+            let stderr = raw.replace("Service Unavailable", phrase);
+            let error = sanitize_cli_error(&["new", "--gpu", "G4"], b"", stderr.as_bytes());
+            assert!(error.contains("G4") && error.contains(&code.to_string()));
+            assert!(
+                !error.contains("request=") && !error.contains("private") && !error.contains('│')
+            );
+        }
+        let stderr = "│ 502 │ response=response │\n\x1b[31mValueError: invalid snapshot\x1b[0m";
+        let error = sanitize_cli_error(&["exec"], b"", stderr.as_bytes());
+        assert!(error.contains("ValueError: invalid snapshot") && !error.contains("502"));
+    }
     #[test]
     fn allocation_args_and_guard_boundary() {
         assert_eq!(

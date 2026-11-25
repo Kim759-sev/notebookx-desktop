@@ -1146,6 +1146,7 @@ td code {
 .step.running > svg {
   color: var(--accent-ink);
 }
+.step.warning > svg { color: #e8ad49; }
 .step.failed > svg {
   color: var(--red);
 }

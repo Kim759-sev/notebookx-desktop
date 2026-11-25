@@ -206,6 +206,7 @@ pub enum StageStatus {
     Pending,
     Running,
     Completed,
+    Warning,
     Failed,
     Skipped,
 }

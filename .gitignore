@@ -2,6 +2,7 @@
 /target
 /src-tauri/target
 /src-tauri/gen
+/bin
 
 # Node / Frontend
 /node_modules

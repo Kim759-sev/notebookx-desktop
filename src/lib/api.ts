@@ -44,6 +44,7 @@ interface Commands {
   save_workflow_profile: [{ profile: WorkflowProfile }, WorkflowProfile[]];
   delete_workflow_profile: [{ profileId: string }, WorkflowProfile[]];
   launch_profile_session: [{ profileId: string }, ColabSession];
+  open_drive_consent: [{ sessionName: string }, void];
   stop_session: [{ sessionName: string; force: boolean }, ColabSession];
   extend_session_deadline: [{ sessionName: string; addMinutes: number }, ColabSession];
   save_comfy_environment_snapshot: [{ sessionName: string }, string];

@@ -95,6 +95,8 @@ Restore nodes and models|恢复插件与模型配置|還原外掛與模型設定
 Connect local tunnel|本地 127.0.0.1 隧道直连|本機 127.0.0.1 通道直連
 Check nodes and queue|出片级自检 H3C / 队列就绪|輸出自檢 H3C / 佇列就緒
 Authorize Drive|授权 Google Drive|授權 Google Drive
+Drive is waiting for permission|请授权 Google Drive 以继续启动|請授權 Google Drive 以繼續啟動
+Create CPU test profile|新建 CPU 测试档位|新增 CPU 測試設定檔
 Open desktop ComfyUI|打开桌面版 ComfyUI 窗口|開啟桌面版 ComfyUI 視窗
 Open in browser|外部浏览器打开|在外部瀏覽器開啟
 Save environment snapshot|保存当前配置/插件快照到云盘|儲存目前設定與外掛快照至雲端硬碟

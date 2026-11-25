@@ -53,6 +53,10 @@ impl AppCore {
         let data_dir = dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("notebookx-desktop");
+        Self::initialize_at(data_dir)
+    }
+
+    fn initialize_at(data_dir: PathBuf) -> Self {
         let _ = std::fs::create_dir_all(&data_dir);
 
         let store_path = data_dir.join("store.json");
@@ -106,6 +110,7 @@ impl AppCore {
             .unwrap_or_default();
         let local_http_client = reqwest::Client::builder()
             .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap_or_default();
@@ -690,7 +695,12 @@ impl AppCore {
         {
             let st = self.store.read().await;
             if let Some(ready) = st.sessions.iter().find(|s| {
-                s.comfyReady
+                s.profileId.as_deref() == Some(profile_id)
+                    && s.comfyReady
+                    && st
+                        .accounts
+                        .iter()
+                        .any(|a| a.isActive && a.id == s.accountId)
                     && matches!(s.state, SessionLifecycle::Ready | SessionLifecycle::Busy)
             }) {
                 return Ok(ready.clone());
@@ -810,6 +820,11 @@ impl AppCore {
         if mode == BackendMode::Real && active_acc.is_none() {
             return Err("请先在「账号与会话」页面关联你的 Google 账号后再启动实例".to_string());
         }
+        if profile.startupMode == ProfileStartupMode::CpuPreDownload
+            && profile.driveMountMode == DriveMountMode::Disabled
+        {
+            return Err("预下载档位需要 Google Drive 保存模型，请先启用挂载。".into());
+        }
 
         let session_short = &Uuid::new_v4().to_string()[..6];
         let session_name = format!("nbx-{}-{session_short}", profile.accelerator_slug());
@@ -875,7 +890,8 @@ impl AppCore {
             state: SessionLifecycle::Provisioning,
             stages: initial_stages,
             driveMounted: false,
-            driveRootPath: Some(profile.driveRootPath.clone()),
+            driveRootPath: (profile.driveMountMode != DriveMountMode::Disabled)
+                .then(|| profile.driveRootPath.clone()),
             driveAuthUrl: None,
             comfyLocalUrl: None,
             managementLocalUrl: None,
@@ -902,8 +918,21 @@ impl AppCore {
 
         {
             let mut st = self.store.write().await;
-            st.sessions
-                .retain(|s| !matches!(s.state, SessionLifecycle::Stopped | SessionLifecycle::Error));
+            if let Some(active) = st.sessions.iter().find(|s| {
+                s.accountId == session.accountId
+                    && s.profileId == session.profileId
+                    && s.state != SessionLifecycle::Stopped
+                    && (s.state != SessionLifecycle::Error || !s.endpoint.is_empty())
+            }) {
+                return Err(format!(
+                    "此档位已有会话 {}。请先查看或释放该实例。",
+                    active.name
+                ));
+            }
+            st.sessions.retain(|s| {
+                s.state != SessionLifecycle::Stopped
+                    && !(s.state == SessionLifecycle::Error && s.endpoint.is_empty())
+            });
             st.sessions.insert(0, session.clone());
         }
         self.persist().await;
@@ -923,7 +952,16 @@ impl AppCore {
                 .find(|p| p.id == profile_id)
                 .cloned()
                 .ok_or_else(|| format!("未找到工作流启动档位 '{profile_id}'"))?;
-            let acc = st.accounts.iter().find(|a| a.isActive).cloned();
+            let owner = st
+                .sessions
+                .iter()
+                .find(|s| s.name == session_name)
+                .ok_or("启动记录不存在。")?;
+            let acc = st
+                .accounts
+                .iter()
+                .find(|a| a.id == owner.accountId)
+                .cloned();
             (
                 prof,
                 acc,
@@ -965,12 +1003,17 @@ impl AppCore {
                 &mut s.stages,
                 "provision",
                 StageStatus::Completed,
-                prov.gpu_name.clone(),
+                Some(
+                    prov.gpu_name
+                        .clone()
+                        .unwrap_or_else(|| format!("{:?} 实例已分配", profile.accelerator)),
+                ),
             );
             set_stage(&mut s.stages, "mount_drive", StageStatus::Running, None);
             s.logs.extend(prov.logs);
         })
         .await;
+        self.persist().await;
 
         // Deploy VM-side Watchdog immediately after VM allocation so cost guard holds even if setup fails!
         match crate::colab::session_runner::deploy_watchdog(
@@ -1011,34 +1054,32 @@ impl AppCore {
                 None
             };
             let store_handle = &self.store;
-            let sname_for_cb = session_name.clone();
+            let sname_for_cb = session_name.as_str();
             match crate::colab::session_runner::mount_google_drive_notifying(
                 &state_file,
                 &session_name,
                 profile.driveMountMode,
                 rclone_cfg.as_deref(),
-                |consent_url| {
-                    let u = consent_url.to_string();
-                    if let Ok(mut guard) = store_handle.try_write() {
-                        if let Some(sess) = guard.sessions.iter_mut().find(|s| s.name == sname_for_cb) {
-                            sess.driveAuthUrl = Some(u.clone());
-                            set_stage(
-                                &mut sess.stages,
-                                "mount_drive",
-                                StageStatus::Running,
-                                Some("请在弹出的浏览器中点击允许挂载 Google Drive...".to_string()),
-                            );
-                            sess.logs.push(format!("[Drive] 等待浏览器确认挂载授权: {u}"));
-                        }
+                |u| async move {
+                    let mut guard = store_handle.write().await;
+                    if let Some(sess) = guard.sessions.iter_mut().find(|s| s.name == sname_for_cb) {
+                        sess.driveAuthUrl = Some(u);
+                        set_stage(
+                            &mut sess.stages,
+                            "mount_drive",
+                            StageStatus::Running,
+                            Some("请在弹出的浏览器中点击允许挂载 Google Drive...".to_string()),
+                        );
+                        sess.logs.push("[Drive] 等待浏览器确认挂载授权。".into());
                     }
                 },
             )
             .await
             {
-                Ok(mount_res) => {
+                Ok(_) => {
                     self.update_session_mut(&session_name, |s| {
                         s.driveMounted = true;
-                        s.driveAuthUrl = mount_res.auth_url;
+                        s.driveAuthUrl = None;
                         set_stage(
                             &mut s.stages,
                             "mount_drive",
@@ -1060,7 +1101,12 @@ impl AppCore {
             }
         } else {
             self.update_session_mut(&session_name, |s| {
-                set_stage(&mut s.stages, "mount_drive", StageStatus::Skipped, None);
+                set_stage(
+                    &mut s.stages,
+                    "mount_drive",
+                    StageStatus::Skipped,
+                    Some("使用实例临时磁盘，停止后文件会被释放。".into()),
+                );
                 set_stage(&mut s.stages, "restore_env", StageStatus::Running, None);
             })
             .await;
@@ -1082,6 +1128,23 @@ impl AppCore {
             ProfileStartupMode::CpuPreDownload => "cpuPreDownload",
         };
         let mut envs = vec![
+            (
+                "NBX_EPHEMERAL".to_string(),
+                if profile.driveMountMode == DriveMountMode::Disabled {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            (
+                "NBX_ACCELERATOR".to_string(),
+                profile
+                    .accelerator
+                    .cli_flag_pair()
+                    .map_or("CPU", |v| v.1)
+                    .into(),
+            ),
             ("NBX_STARTUP_MODE".to_string(), startup_mode_str.to_string()),
             ("NBX_DRIVE_ROOT".to_string(), profile.driveRootPath.clone()),
             ("NBX_COMFY_PORT".to_string(), profile.comfyPort.to_string()),
@@ -1093,9 +1156,7 @@ impl AppCore {
         if let Some(rel) = &profile.managedScriptRelPath {
             envs.push(("NBX_MANAGED_SCRIPT".to_string(), rel.clone()));
         }
-        if let Some(mp) = profile.managementPort {
-            envs.push(("NBX_MGMT_PORT".to_string(), mp.to_string()));
-        }
+        envs.push(("NBX_MGMT_PORT".to_string(), profile.managementPort.unwrap_or(0).to_string()));
         if let Some(hf) = hf_token {
             envs.push(("HF_TOKEN".to_string(), hf));
         }
@@ -1103,21 +1164,28 @@ impl AppCore {
             envs.push(("CIVITAI_TOKEN".to_string(), civ));
         }
 
-        let mut effective_mgmt_port = profile.managementPort;
+        let mut effective_mgmt_port = match profile.startupMode {
+            ProfileStartupMode::CpuPreDownload => None,
+            _ => profile.managementPort,
+        };
         match crate::colab::session_runner::exec_python_on_session(
             &state_file,
             &session_name,
             crate::comfy::BOOTSTRAP_COMFY_PY,
             &envs,
-            1800,
+            1860,
         )
         .await
         {
             Ok(output) => {
                 let mut cf_url = extract_trycloudflare_url(&output);
+                let mut fallback = None;
                 for line in output.lines() {
                     if let Some(rest) = line.trim().strip_prefix("__NBX_STAGE__ ") {
                         if let Ok(ev) = serde_json::from_str::<serde_json::Value>(rest) {
+                            if ev["stage"] == "managedScript" && ev["status"] == "skipped" {
+                                fallback = ev["detail"].as_str().map(str::to_owned);
+                            }
                             if ev.get("stage").and_then(|v| v.as_str()) == Some("ready") {
                                 if ev.get("managementPort").is_some_and(|v| v.is_null()) {
                                     effective_mgmt_port = None;
@@ -1137,7 +1205,7 @@ impl AppCore {
                         &mut s.stages,
                         "restore_env",
                         StageStatus::Completed,
-                        Some("环境与模型目录映射完成".to_string()),
+                        Some(fallback.unwrap_or_else(|| "环境与模型目录映射完成".to_string())),
                     );
                     set_stage(&mut s.stages, "tunnel", StageStatus::Running, None);
                     for line in &all_lines[tail_start..] {
@@ -1168,7 +1236,7 @@ impl AppCore {
                 return Err(err);
             }
             if let Some(mp) = effective_mgmt_port {
-                if self
+                if let Err(err) = self
                     .create_port_tunnel(
                         &session_name,
                         mp,
@@ -1177,21 +1245,30 @@ impl AppCore {
                         Some("/".to_string()),
                     )
                     .await
-                    .is_err()
                 {
                     effective_mgmt_port = None;
+                    self.update_session_mut(&session_name, |s| {
+                        s.logs
+                            .push(format!("[Warning] 管理端口 {mp} 的 SSH 转发失败。{err}"));
+                    })
+                    .await;
                 }
             }
         }
 
         self.update_session_mut(&session_name, |s| {
-            s.comfyLocalUrl = Some(format!("http://127.0.0.1:{}", profile.comfyPort));
+            let serve = profile.startupMode != ProfileStartupMode::CpuPreDownload;
+            s.comfyLocalUrl = serve.then(|| format!("http://127.0.0.1:{}", profile.comfyPort));
             s.managementLocalUrl = effective_mgmt_port.map(|mp| format!("http://127.0.0.1:{mp}"));
             set_stage(
                 &mut s.stages,
                 "tunnel",
-                StageStatus::Completed,
-                Some(format!("127.0.0.1:{} 隧道守护已启动", profile.comfyPort)),
+                if serve {
+                    StageStatus::Completed
+                } else {
+                    StageStatus::Skipped
+                },
+                serve.then(|| format!("127.0.0.1:{} 已接受 SSH 转发连接", profile.comfyPort)),
             );
             set_stage(&mut s.stages, "readiness", StageStatus::Running, None);
         })
@@ -1202,69 +1279,74 @@ impl AppCore {
         let mut missing_nodes = Vec::new();
         if profile.startupMode != ProfileStartupMode::CpuPreDownload {
             let base = format!("http://127.0.0.1:{}", profile.comfyPort);
-            let mut stats_ok = false;
-            let mut queue_ok = false;
-            for _ in 0..30 {
-                if let Ok(r) = self
-                    .local_http_client
-                    .get(format!("{base}/system_stats"))
-                    .timeout(std::time::Duration::from_secs(4))
-                    .send()
-                    .await
-                {
-                    if r.status().is_success() {
-                        stats_ok = true;
-                        if let Ok(qr) = self
-                            .local_http_client
-                            .get(format!("{base}/queue"))
-                            .timeout(std::time::Duration::from_secs(4))
-                            .send()
-                            .await
-                        {
-                            queue_ok = qr.status().is_success();
-                        }
-                        if queue_ok {
-                            break;
-                        }
-                    }
+            let probe = || async {
+                let stats =
+                    comfy_probe(&self.local_http_client, &format!("{base}/system_stats")).await?;
+                if !stats["system"].is_object() || !stats["devices"].is_array() {
+                    return Err("/system_stats 未返回 ComfyUI 的系统与设备信息。".into());
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            }
-
-            if !stats_ok || !queue_ok {
-                let err = format!(
-                    "本地隧道 127.0.0.1:{} 未能连通云端 ComfyUI (/system_stats={}, /queue={})",
-                    profile.comfyPort, stats_ok, queue_ok
-                );
+                let queue = comfy_probe(&self.local_http_client, &format!("{base}/queue")).await?;
+                if !queue["queue_running"].is_array() || !queue["queue_pending"].is_array() {
+                    return Err("/queue 未返回 ComfyUI 的运行和等待队列。".into());
+                }
+                Ok::<_, String>(())
+            };
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+            let result = loop {
+                match probe().await {
+                    Err(_) if tokio::time::Instant::now() < deadline => {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await
+                    }
+                    result => break result,
+                }
+            };
+            if let Err(e) = result {
+                let err = format!("本地隧道 {base} 的 ComfyUI 自检失败。{e}");
                 self.mark_stage_failed(&session_name, "readiness", &err)
                     .await;
                 return Err(err);
             }
 
             for node in &profile.requiredNodes {
-                let ok = match self
-                    .local_http_client
-                    .get(format!("{base}/object_info/{node}"))
-                    .timeout(std::time::Duration::from_secs(5))
-                    .send()
-                    .await
-                {
-                    Ok(resp) => resp
+                let mut url = reqwest::Url::parse(&base).unwrap();
+                url.path_segments_mut()
+                    .unwrap()
+                    .extend(["object_info", node]);
+                let checked = async {
+                    let response = self
+                        .local_http_client
+                        .get(url)
+                        .timeout(std::time::Duration::from_secs(5))
+                        .send()
+                        .await?;
+                    if response.status() == reqwest::StatusCode::NOT_FOUND {
+                        return Ok(false);
+                    }
+                    let data = response
+                        .error_for_status()?
                         .json::<serde_json::Value>()
-                        .await
-                        .map(|v| v.get(node).is_some())
-                        .unwrap_or(false),
-                    Err(_) => false,
-                };
-                if ok {
-                    loaded_nodes.push(node.clone());
-                } else {
-                    missing_nodes.push(node.clone());
+                        .await?;
+                    Ok::<_, reqwest::Error>(data.get(node).is_some())
+                }
+                .await;
+                match checked {
+                    Ok(true) => loaded_nodes.push(node.clone()),
+                    Ok(false) => missing_nodes.push(node.clone()),
+                    Err(e) => {
+                        let err = format!("无法核实节点 {node}。{e}");
+                        self.mark_stage_failed(&session_name, "readiness", &err)
+                            .await;
+                        return Err(err);
+                    }
                 }
             }
         }
 
-        if profile.syncDramaSmith && auto_sync_ds {
+        if profile.syncDramaSmith
+            && auto_sync_ds
+            && missing_nodes.is_empty()
+            && profile.startupMode != ProfileStartupMode::CpuPreDownload
+        {
             let sync_target = self
                 .gateway_bound_url
                 .read()
@@ -1283,13 +1365,31 @@ impl AppCore {
                 s.missingRequiredNodes = missing_nodes.clone();
                 s.state = SessionLifecycle::Ready;
                 let detail = if !missing_nodes.is_empty() {
-                    format!("ComfyUI 已通，但缺少节点: {}", missing_nodes.join(", "))
+                    format!(
+                        "标准 ComfyUI 可用。此工作流缺少 {}，请安装对应自定义节点后再运行。",
+                        missing_nodes.join(", ")
+                    )
                 } else if !loaded_nodes.is_empty() {
                     format!("出片自检通过 · 已加载 {}", loaded_nodes.join(", "))
                 } else {
                     "出片级自检全部通过".to_string()
                 };
-                set_stage(&mut s.stages, "readiness", StageStatus::Completed, Some(detail));
+                let status = if !missing_nodes.is_empty() {
+                    StageStatus::Warning
+                } else if !s.comfyReady {
+                    StageStatus::Skipped
+                } else {
+                    StageStatus::Completed
+                };
+                if !missing_nodes.is_empty() {
+                    s.logs.push(format!("[Warning] {detail}"));
+                }
+                set_stage(
+                    &mut s.stages,
+                    "readiness",
+                    status,
+                    s.comfyReady.then_some(detail),
+                );
             })
             .await
             .ok_or_else(|| "Session state lost".to_string())?;
@@ -1300,7 +1400,14 @@ impl AppCore {
 
     async fn mark_stage_failed(&self, session_name: &str, stage_id: &str, err: &str) {
         self.update_session_mut(session_name, |s| {
+            if matches!(
+                s.state,
+                SessionLifecycle::Stopped | SessionLifecycle::Stopping
+            ) {
+                return;
+            }
             s.state = SessionLifecycle::Error;
+            s.driveAuthUrl = None;
             s.lastError = Some(err.to_string());
             set_stage(
                 &mut s.stages,
@@ -1359,6 +1466,11 @@ impl AppCore {
                 st.settings.defaultCostGuard.safeBackupBeforeStop,
             )
         };
+        if mode == BackendMode::Real && sess.endpoint.is_empty() {
+            return Err(
+                "此会话尚无可核实的实例标识。请等待分配结束，或刷新账号的活动实例清单。".into(),
+            );
+        }
 
         self.update_session_mut(session_name, |s| {
             s.state = SessionLifecycle::Stopping;
@@ -1371,7 +1483,7 @@ impl AppCore {
         if mode == BackendMode::Real && !sess.endpoint.trim().is_empty() {
             let state_file =
                 crate::colab::accounts::account_state_file(&self.data_dir, &sess.accountId);
-            verified = crate::colab::session_runner::verified_safe_stop(
+            let stop_result = crate::colab::session_runner::verified_safe_stop(
                 &self.data_dir,
                 &state_file,
                 &sess.accountId,
@@ -1383,7 +1495,19 @@ impl AppCore {
                 safe_backup && !force && sess.driveMounted,
                 force || matches!(sess.state, SessionLifecycle::Error | SessionLifecycle::Provisioning | SessionLifecycle::Orphan),
             )
-            .await?;
+            .await;
+            verified = match stop_result {
+                Ok(verified) => verified,
+                Err(e) => {
+                    self.update_session_mut(session_name, |s| {
+                        s.state = sess.state;
+                        s.lastError = Some(e.clone());
+                    })
+                    .await;
+                    self.persist().await;
+                    return Err(e);
+                }
+            };
         }
 
         // Stop tunnels attached to this session
@@ -1416,6 +1540,25 @@ impl AppCore {
 
         self.persist().await;
         Ok(stopped)
+    }
+
+    pub async fn open_drive_consent(&self, session_name: &str) -> Result<(), String> {
+        let store = self.store.read().await;
+        let url = store
+            .sessions
+            .iter()
+            .find(|s| s.name == session_name && s.state == SessionLifecycle::Bootstrapping)
+            .and_then(|s| s.driveAuthUrl.as_deref())
+            .ok_or("当前没有待处理的 Drive 授权。")?;
+        let url = reqwest::Url::parse(url).map_err(|_| "Drive 授权链接无效。")?;
+        if url.scheme() != "https"
+            || !url
+                .host_str()
+                .is_some_and(|h| h == "google.com" || h.ends_with(".google.com"))
+        {
+            return Err("Drive 授权链接无效。".into());
+        }
+        open::that_detached(url.as_str()).map_err(|e| e.to_string())
     }
 
     pub async fn extend_session_deadline(
@@ -1482,6 +1625,9 @@ impl AppCore {
                 .ok_or_else(|| format!("未找到运行中的会话 '{session_name}'"))?;
             (st.settings.backendMode, found)
         };
+        if !sess.driveMounted {
+            return Err("保存快照需要已挂载的 Google Drive。".into());
+        }
         let drive_root = sess
             .driveRootPath
             .clone()
@@ -1577,15 +1723,32 @@ impl AppCore {
         }
 
         if mode == BackendMode::Real {
-            let state_file = crate::colab::accounts::account_state_file(&self.data_dir, &account_id);
-            let handle = crate::colab::tunnel::spawn_supervised_tunnel(
+            let state_file =
+                crate::colab::accounts::account_state_file(&self.data_dir, &account_id);
+            let handle = match crate::colab::tunnel::spawn_supervised_tunnel(
                 state_file,
                 session_name.to_string(),
                 remote_port,
                 local_port,
                 health_path,
             )
-            .await?;
+            .await
+            {
+                Ok(handle) => handle,
+                Err(err) => {
+                    if let Some(t) = self
+                        .tunnels
+                        .write()
+                        .await
+                        .iter_mut()
+                        .find(|t| t.id == tunnel_id)
+                    {
+                        t.status = TunnelStatus::Failed;
+                        t.lastError = Some(err.clone());
+                    }
+                    return Err(err);
+                }
+            };
             let live = handle.snapshot();
             self.tunnel_stops.lock().await.insert(tunnel_id.clone(), handle);
             let mut list = self.tunnels.write().await;
@@ -1926,7 +2089,15 @@ impl AppCore {
             let st = self.store.read().await;
             st.sessions
                 .iter()
-                .find(|s| s.comfyReady && matches!(s.state, SessionLifecycle::Ready | SessionLifecycle::Busy))
+                .find(|s| {
+                    s.profileId.as_deref() == Some(&target_profile_id)
+                        && st
+                            .accounts
+                            .iter()
+                            .any(|a| a.isActive && a.id == s.accountId)
+                        && s.comfyReady
+                        && matches!(s.state, SessionLifecycle::Ready | SessionLifecycle::Busy)
+                })
                 .cloned()
         };
 
@@ -1941,13 +2112,31 @@ impl AppCore {
             }
         };
 
+        if let Some(nodes) = graph.as_object() {
+            let missing: Vec<_> = session
+                .missingRequiredNodes
+                .iter()
+                .filter(|class| {
+                    nodes
+                        .values()
+                        .any(|node| node["class_type"].as_str() == Some(class.as_str()))
+                })
+                .cloned()
+                .collect();
+            if !missing.is_empty() {
+                return Err(format!(
+                    "无法运行此工作流，请先安装缺少的节点：{}。",
+                    missing.join(", ")
+                ));
+            }
+        }
         let seq_path = effective_seq_name.as_ref().map(|seq| {
             format!(
                 "{}/outputs/h3_sequences/{seq}",
                 session
                     .driveRootPath
                     .as_deref()
-                    .unwrap_or("/content/drive/MyDrive/DramaSmith-H3")
+                    .unwrap_or("/content/notebookx-session")
             )
         });
 
@@ -2405,12 +2594,135 @@ impl WorkflowProfile {
     }
 }
 
+async fn comfy_probe(client: &reqwest::Client, url: &str) -> Result<serde_json::Value, String> {
+    let response = client
+        .get(url)
+        .timeout(std::time::Duration::from_secs(4))
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| e.to_string())?;
+    response
+        .json()
+        .await
+        .map_err(|e| format!("{url} 返回的 JSON 无效。{e}"))
+}
+
+#[cfg(test)]
+mod lifecycle_test {
+    use super::*;
+    use crate::colab::accounts::{account_helper, account_state_path, session_endpoint};
+
+    #[tokio::test]
+    #[ignore = "allocates a real Colab CPU VM; set NBX_LIVE_ACCOUNT to a linked test account"]
+    async fn live_colab_cpu_lifecycle() -> Result<(), String> {
+        let id = std::env::var("NBX_LIVE_ACCOUNT").map_err(|_| "Set NBX_LIVE_ACCOUNT")?;
+        let saved = dirs::config_dir()
+            .unwrap()
+            .join("notebookx-desktop/store.json");
+        let saved: PersistedStore = serde_json::from_slice(&std::fs::read(saved).unwrap()).unwrap();
+        let mut account = saved
+            .accounts
+            .into_iter()
+            .find(|a| a.id == id)
+            .ok_or("Account not linked")?;
+        account.isActive = true;
+        let temp = tempfile::tempdir().unwrap();
+        let core = AppCore::initialize_at(temp.path().to_owned());
+        let profile_id = "live-comfy";
+        {
+            let mut st = core.store.write().await;
+            let mut profile = st.profiles[0].clone();
+            profile.id = profile_id.into();
+            profile.accelerator = AcceleratorKind::Cpu;
+            profile.minVramGb = 0;
+            profile.driveMountMode = DriveMountMode::Disabled;
+            profile.costGuard.autoStopMinutes = Some(40);
+            profile.costGuard.idleStopMinutes = Some(15);
+            profile.syncDramaSmith = false;
+            st.profiles = vec![profile];
+            st.accounts = vec![account];
+        }
+        let before = account_helper(&["assignments", &id], None).await?;
+        if before != json!([]) {
+            return Err("Live test requires an idle account".into());
+        }
+        let sess = core.prepare_session_record(profile_id).await?;
+        let state = account_state_path(&core.data_dir, &id)?;
+        let run = core.execute_real_launch_pipeline(profile_id, &sess.name);
+        tokio::pin!(run);
+        let result = loop {
+            tokio::select! {
+                result = &mut run => break result,
+                _ = tokio::time::sleep(std::time::Duration::from_secs(15)) => {
+                    let snapshot = core.store.read().await;
+                    let session = &snapshot.sessions[0];
+                    eprintln!("live stage {:?}, watchdog={}", session.stages.iter().find(|s| s.status == StageStatus::Running).map(|s| &s.id), session.watchdogActive);
+                }
+            }
+        };
+        // Finally release this launch, also when a later stage returned an error.
+        let endpoint = session_endpoint(&state, &sess.name).await?;
+        let mut drive = Ok(());
+        if result.is_ok() {
+            // Exercise the actual native consent prompt without approving on the
+            // account owner's behalf or writing test files to their Drive.
+            drive = crate::colab::mount_google_drive_with_consent(
+                &state,
+                &sess.name,
+                DriveMountMode::ColabNative,
+                None,
+                |_validated_url| async { Err("live consent prompt observed".into()) },
+            )
+            .await;
+            match drive.as_ref() {
+                Err(e) if e == "live consent prompt observed" => {
+                    eprintln!(
+                        "Native Google Drive requested browser consent; Google URL delivered"
+                    );
+                    drive = Ok(());
+                }
+                Ok(_) => eprintln!("Native Google Drive mount verified"),
+                _ => (),
+            }
+        }
+        let mut stop = Ok(());
+        if let Some(endpoint) = endpoint {
+            stop = core.stop_session(&sess.name, false).await.and_then(|s| {
+                s.verifiedUnassigned
+                    .then_some(())
+                    .ok_or_else(|| "Stop unverified".into())
+            });
+            if stop.is_err() {
+                account_helper(&["unassign", &endpoint, &id], None).await?;
+            }
+        }
+        let after = account_helper(&["assignments", &id], None).await?;
+        let count = account_helper(&["usage", &id], None).await?["assignmentsCount"].clone();
+        assert_eq!(after, json!([]));
+        assert_eq!(count, 0);
+        eprintln!("live teardown verified: assignments=[], activeAssignmentsCount={count}");
+        stop?;
+        drive?;
+        let done = result?;
+        for stage in &done.stages {
+            eprintln!("{} {:?} {:?}", stage.id, stage.status, stage.detail);
+        }
+        assert!(done.watchdogActive && done.comfyReady);
+        assert_eq!(done.comfyLocalUrl.as_deref(), Some("http://127.0.0.1:8188"));
+        assert_eq!(
+            done.missingRequiredNodes,
+            ["H3C_Timeline", "H3C_SaveSegment"]
+        );
+        assert_eq!(done.stages.last().unwrap().status, StageStatus::Warning);
+        Ok(())
+    }
+}
+
 fn set_stage(stages: &mut [StartupStage], id: &str, status: StageStatus, detail: Option<String>) {
     if let Some(st) = stages.iter_mut().find(|x| x.id == id) {
         st.status = status;
-        if detail.is_some() {
-            st.detail = detail;
-        }
+        st.detail = detail;
     }
 }
 
